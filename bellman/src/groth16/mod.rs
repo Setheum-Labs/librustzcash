@@ -548,9 +548,8 @@ impl<E: Engine> ExtendedParameters<E> {
     // - bases
     pub fn verify<C: Circuit<E>>(&self, circuit: C) -> Result<(), SynthesisError> {
 
-        // Convert the circuit in R1CS to the QAP in Lagrange base in the roots of unity.
-        // As the check is given in monomial base, later the polynomials are interpolated with iFFT.
-        // The additional input and constraints are Groth16/bellman specific, see the code in generator or prover.
+        // Convert the circuit in R1CS to the QAP in Lagrange base in the roots of unity
+        // The additional input and constraints are Groth16/bellman specific, see the code in generator or prover
 
         let mut assembly = KeypairAssembly {
             num_inputs: 0,
@@ -576,8 +575,37 @@ impl<E: Engine> ExtendedParameters<E> {
             assembly.enforce(|| "", |lc| lc + Variable(Index::Input(i)), |lc| lc, |lc| lc);
         }
 
+
+
+        // Convert the QAP polynomials to monomial base and evaluate them in tau in the exponent
+        // Polynomials corresponding to the (public) inputs go first
+        // These evaluations are used twice:
+        // 1. ai and ci in G1 and bi in G2 are used in sections 4 and 5 of the Fuchsbauer's check
+        // 2. ai in G1 and bi in G1 and G2 to validate evaluations provided by bellman CRS that are actually used by the prover
+
+        let mut a_g1 = vec![E::G1::zero(); assembly.num_inputs + assembly.num_aux];
+        let mut b_g1 = vec![E::G1::zero(); assembly.num_inputs + assembly.num_aux];
+        let mut b_g2 = vec![E::G2::zero(); assembly.num_inputs + assembly.num_aux];
+        let mut c_g1 = vec![E::G1::zero(); assembly.num_inputs + assembly.num_aux];
+        for ((((((ai_g1, bi_g1), bi_g2), ci_g1), a_coeffs), b_coeffs), c_coeffs) in a_g1.iter_mut()
+            .zip(b_g1.iter_mut())
+            .zip(b_g2.iter_mut())
+            .zip(c_g1.iter_mut())
+            .zip(assembly.at_inputs.iter().chain(assembly.at_aux.iter()))
+            .zip(assembly.bt_inputs.iter().chain(assembly.bt_aux.iter()))
+            .zip(assembly.ct_inputs.iter().chain(assembly.ct_aux.iter()))
+        {
+            *ai_g1 = eval1::<E>(a_coeffs, &self.taus_g1, assembly.num_constraints)?;
+            *bi_g1 = eval1::<E>(b_coeffs, &self.taus_g1, assembly.num_constraints)?;
+            *bi_g2 = eval2::<E>(b_coeffs, &self.taus_g2, assembly.num_constraints)?;
+            *ci_g1 = eval1::<E>(c_coeffs, &self.taus_g1, assembly.num_constraints)?;
+        }
+
+
         //TODO: sizes
         assert_eq!(self.params.l.len(), assembly.num_aux);
+
+        // https://eprint.iacr.org/2017/587, p. 26
 
         // 1
         // P1 != 0
@@ -642,19 +670,16 @@ impl<E: Engine> ExtendedParameters<E> {
         if E::pairing(self.g1, self.params.vk.delta_g2) != E::pairing(self.params.vk.delta_g1, self.g2) {
             return Err(SynthesisError::MalformedCrs);
         }
-        //
-        for (((li, ai), bi), ci) in self.params.l.iter()
-            .zip(assembly.at_aux.iter())
-            .zip(assembly.bt_aux.iter())
-            .zip(assembly.ct_aux.iter())
+
+        for (((li, ai_g1), bi_g2), ci_g1) in self.params.l.iter()
+            .zip(a_g1.iter().skip(assembly.num_inputs))
+            .zip(b_g2.iter().skip(assembly.num_inputs))
+            .zip(c_g1.iter().skip(assembly.num_inputs))
         {
             let lhs = E::pairing(li.clone(), self.params.vk.delta_g2);
-            let eval_a = eval1::<E>(ai, &self.taus_g1, assembly.num_constraints)?;
-            let eval_b = eval2::<E>(bi, &self.taus_g2, assembly.num_constraints)?;
-            let eval_c = eval1::<E>(ci, &self.taus_g1, assembly.num_constraints)?;
-            let mut rhs = E::pairing(eval_a, self.params.vk.beta_g2);
-            rhs.mul_assign(&E::pairing(self.params.vk.alpha_g1, eval_b));
-            rhs.mul_assign(&E::pairing(eval_c, self.g2));
+            let mut rhs = E::pairing(ai_g1.clone(), self.params.vk.beta_g2);
+            rhs.mul_assign(&E::pairing(self.params.vk.alpha_g1, bi_g2.clone()));
+            rhs.mul_assign(&E::pairing(ci_g1.clone(), self.g2));
             if lhs != rhs {
                 return Err(SynthesisError::MalformedCrs);
             }
@@ -662,6 +687,7 @@ impl<E: Engine> ExtendedParameters<E> {
 
         // 5
         // z (aka t in Groth16/bellman) is the vanishing polynomial of the domain. In our case z = x^m - 1
+        // btw, there's a typo un Fuc19, as z should have degree d-1 in his notation
         let mut z = self.taum_g1.into_projective();
         let g1 = self.taus_g1[0].into_projective();
         z.sub_assign(&g1);
@@ -671,19 +697,37 @@ impl<E: Engine> ExtendedParameters<E> {
             }
         }
 
-        for (((ici, ai), bi), ci) in self.params.vk.ic.iter()
-            .zip(assembly.at_inputs.iter())
-            .zip(assembly.bt_inputs.iter())
-            .zip(assembly.ct_inputs.iter())
+        for (((ici, ai_g1), bi_g2), ci_g1) in self.params.vk.ic.iter()
+            .zip(a_g1.iter())
+            .zip(b_g2.iter())
+            .zip(c_g1.iter())
         {
             let lhs = E::pairing(ici.clone(), self.params.vk.gamma_g2);
-            let eval_a = eval1::<E>(ai, &self.taus_g1, assembly.num_constraints)?;
-            let eval_b = eval2::<E>(bi, &self.taus_g2, assembly.num_constraints)?;
-            let eval_c = eval1::<E>(ci, &self.taus_g1, assembly.num_constraints)?;
-            let mut rhs = E::pairing(eval_a, self.params.vk.beta_g2);
-            rhs.mul_assign(&E::pairing(self.params.vk.alpha_g1, eval_b));
-            rhs.mul_assign(&E::pairing(eval_c, self.g2));
+            let mut rhs = E::pairing(ai_g1.clone(), self.params.vk.beta_g2);
+            rhs.mul_assign(&E::pairing(self.params.vk.alpha_g1, bi_g2.clone()));
+            rhs.mul_assign(&E::pairing(ci_g1.clone(), self.g2));
             if lhs != rhs {
+                return Err(SynthesisError::MalformedCrs);
+            }
+        }
+
+        // Check that QAP polynomial evaluations given in the CRS coincide with those computed above
+
+//        assert_eq!(self.params.a.len(), assembly.num_inputs + assembly.num_aux);
+//        assert_eq!(self.params.b_g1.l en(), assembly.num_inputs + assembly.num_aux);
+//        assert_eq!(self.params.b_g2.len(), assembly.num_inputs + assembly.num_aux);
+
+        // TODO: filter zero evaluations at the very beginning
+        for (((((ai_g1, bi_g1), bi_g2), crs_ai_g1), crs_bi_g1), crs_bi_g2) in a_g1.iter().filter(|e| !e.is_zero())
+            .zip(b_g1.iter().filter(|e| !e.is_zero()))
+            .zip(b_g2.iter().filter(|e| !e.is_zero()))
+            .zip(self.params.a.iter())
+            .zip(self.params.b_g1.iter())
+            .zip(self.params.b_g2.iter())
+        {
+            if ai_g1.into_affine() != *crs_ai_g1
+                || bi_g1.into_affine() != *crs_bi_g1
+                || bi_g2.into_affine() != *crs_bi_g2 {
                 return Err(SynthesisError::MalformedCrs);
             }
         }
