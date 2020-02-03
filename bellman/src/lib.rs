@@ -309,6 +309,8 @@ pub enum SynthesisError {
     MalformedVerifyingKey,
     /// During CRS generation, we observed an unconstrained auxiliary variable
     UnconstrainedVariable,
+    /// CRS did not pass the subversion check
+    MalformedCrs,
 }
 
 impl From<io::Error> for SynthesisError {
@@ -330,6 +332,7 @@ impl Error for SynthesisError {
             SynthesisError::IoError(_) => "encountered an I/O error",
             SynthesisError::MalformedVerifyingKey => "malformed verifying key",
             SynthesisError::UnconstrainedVariable => "auxiliary variable was unconstrained",
+            SynthesisError::MalformedCrs => "malformed CRS",
         }
     }
 }

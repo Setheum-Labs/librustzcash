@@ -6,13 +6,35 @@ use ff::{Field, PrimeField};
 use group::{CurveAffine, CurveProjective, Wnaf};
 use pairing::Engine;
 
-use super::{Parameters, VerifyingKey};
+use super::{Parameters, VerifyingKey, ExtendedParameters};
 
 use crate::{Circuit, ConstraintSystem, Index, LinearCombination, SynthesisError, Variable};
 
 use crate::domain::{EvaluationDomain, Scalar};
 
 use crate::multicore::Worker;
+
+/// Generates a random common reference string for
+/// a circuit.
+pub fn generate_extended_random_parameters<E, C, R>(
+    circuit: C,
+    rng: &mut R,
+) -> Result<ExtendedParameters<E>, SynthesisError>
+    where
+        E: Engine,
+        C: Circuit<E>,
+        R: RngCore,
+{
+    let g1 = E::G1::random(rng);
+    let g2 = E::G2::random(rng);
+    let alpha = E::Fr::random(rng);
+    let beta = E::Fr::random(rng);
+    let gamma = E::Fr::random(rng);
+    let delta = E::Fr::random(rng);
+    let tau = E::Fr::random(rng);
+
+    generate_extended_parameters::<E, C>(circuit, g1, g2, alpha, beta, gamma, delta, tau)
+}
 
 /// Generates a random common reference string for
 /// a circuit.
@@ -38,16 +60,17 @@ where
 
 /// This is our assembly structure that we'll use to synthesize the
 /// circuit into a QAP.
-struct KeypairAssembly<E: Engine> {
-    num_inputs: usize,
-    num_aux: usize,
-    num_constraints: usize,
-    at_inputs: Vec<Vec<(E::Fr, usize)>>,
-    bt_inputs: Vec<Vec<(E::Fr, usize)>>,
-    ct_inputs: Vec<Vec<(E::Fr, usize)>>,
-    at_aux: Vec<Vec<(E::Fr, usize)>>,
-    bt_aux: Vec<Vec<(E::Fr, usize)>>,
-    ct_aux: Vec<Vec<(E::Fr, usize)>>,
+// TODO: pubs
+pub struct KeypairAssembly<E: Engine> {
+    pub num_inputs: usize,
+    pub num_aux: usize,
+    pub num_constraints: usize,
+    pub at_inputs: Vec<Vec<(E::Fr, usize)>>,
+    pub bt_inputs: Vec<Vec<(E::Fr, usize)>>,
+    pub ct_inputs: Vec<Vec<(E::Fr, usize)>>,
+    pub at_aux: Vec<Vec<(E::Fr, usize)>>,
+    pub bt_aux: Vec<Vec<(E::Fr, usize)>>,
+    pub ct_aux: Vec<Vec<(E::Fr, usize)>>,
 }
 
 impl<E: Engine> ConstraintSystem<E> for KeypairAssembly<E> {
@@ -152,7 +175,6 @@ impl<E: Engine> ConstraintSystem<E> for KeypairAssembly<E> {
     }
 }
 
-/// Create parameters for a circuit, given some toxic waste.
 pub fn generate_parameters<E, C>(
     circuit: C,
     g1: E::G1,
@@ -163,6 +185,25 @@ pub fn generate_parameters<E, C>(
     delta: E::Fr,
     tau: E::Fr,
 ) -> Result<Parameters<E>, SynthesisError>
+    where
+        E: Engine,
+        C: Circuit<E>,
+{
+    let params = generate_extended_parameters::<E, C>(circuit, g1, g2, alpha, beta, gamma, delta, tau)?;
+    Ok(params.params)
+}
+
+/// Create parameters for a circuit, given some toxic waste.
+pub fn generate_extended_parameters<E, C>(
+    circuit: C,
+    g1: E::G1,
+    g2: E::G2,
+    alpha: E::Fr,
+    beta: E::Fr,
+    gamma: E::Fr,
+    delta: E::Fr,
+    tau: E::Fr,
+) -> Result<ExtendedParameters<E>, SynthesisError>
 where
     E: Engine,
     C: Circuit<E>,
@@ -198,8 +239,10 @@ where
     // Compute G1 window table
     let mut g1_wnaf = Wnaf::new();
     let g1_wnaf = g1_wnaf.base(g1, {
+        // powers of tau in G1
+        powers_of_tau.as_ref().len()
         // H query
-        (powers_of_tau.as_ref().len() - 1)
+        + (powers_of_tau.as_ref().len() - 1)
         // IC/L queries
         + assembly.num_inputs + assembly.num_aux
         // A query
@@ -211,8 +254,10 @@ where
     // Compute G2 window table
     let mut g2_wnaf = Wnaf::new();
     let g2_wnaf = g2_wnaf.base(g2, {
+        // powers of tau in G1
+        powers_of_tau.as_ref().len()
         // B query
-        assembly.num_inputs + assembly.num_aux
+        + assembly.num_inputs + assembly.num_aux
     });
 
     let gamma_inverse = {
@@ -234,7 +279,10 @@ where
 
     let worker = Worker::new();
 
+    let mut taus_g1 = vec![E::G1::zero(); powers_of_tau.as_ref().len()];
+    let mut taus_g2 = vec![E::G2::zero(); powers_of_tau.as_ref().len()];
     let mut h = vec![E::G1::zero(); powers_of_tau.as_ref().len() - 1];
+
     {
         // Compute powers of tau
         {
@@ -252,6 +300,33 @@ where
                 }
             });
         }
+
+        // Compute powers of tau in G1 and G2
+        worker.scope(taus_g1.len(), |scope, chunk| {
+            for ((taus_g1, taus_g2), p) in taus_g1.chunks_mut(chunk)
+                .zip(taus_g2.chunks_mut(chunk))
+                .zip(powers_of_tau.as_ref().chunks(chunk))
+                {
+                    let mut g1_wnaf = g1_wnaf.shared();
+                    let mut g2_wnaf = g2_wnaf.shared();
+
+                    scope.spawn(move |_scope| {
+                        // Set values of the taus_g1 to g1^(tau^i)
+                        for ((tau_g1, tau_g2), p) in taus_g1.iter_mut()
+                            .zip(taus_g2.iter_mut())
+                            .zip(p.iter()) {
+                            // Exponentiate
+                            let exp = p.0.into_repr();
+                            *tau_g1 = g1_wnaf.scalar(exp);
+                            *tau_g2 = g2_wnaf.scalar(exp);
+                        }
+
+                        // Batch normalize
+                        E::G1::batch_normalization(taus_g1);
+                        E::G2::batch_normalization(taus_g2);
+                    });
+                }
+        });
 
         // coeff = t(x) / delta
         let mut coeff = powers_of_tau.z(&tau);
@@ -282,6 +357,11 @@ where
             }
         });
     }
+
+    let mut taum = powers_of_tau.as_ref()[powers_of_tau.as_ref().len() - 1];
+    taum.0.mul_assign(&tau);
+    let mut taum_g1 = g1.clone();
+    taum_g1.mul_assign(taum.0.into_repr());
 
     // Use inverse FFT to convert powers of tau to Lagrange coefficients
     powers_of_tau.ifft(&worker);
@@ -464,7 +544,7 @@ where
         ic: ic.into_iter().map(|e| e.into_affine()).collect(),
     };
 
-    Ok(Parameters {
+    let params = Parameters {
         vk,
         h: Arc::new(h.into_iter().map(|e| e.into_affine()).collect()),
         l: Arc::new(l.into_iter().map(|e| e.into_affine()).collect()),
@@ -488,5 +568,14 @@ where
                 .map(|e| e.into_affine())
                 .collect(),
         ),
+    };
+
+    Ok(ExtendedParameters {
+        params: params,
+        g1: g1,
+        g2: g2,
+        taus_g1: Arc::new(taus_g1.into_iter().map(|e| e.into_affine()).collect()),
+        taus_g2: Arc::new(taus_g2.into_iter().map(|e| e.into_affine()).collect()),
+        taum_g1: taum_g1.into_affine()
     })
 }
