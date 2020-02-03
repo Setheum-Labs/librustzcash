@@ -662,9 +662,9 @@ impl<E: Engine> ExtendedParameters<E> {
 
         // 5
         // z (aka t in Groth16/bellman) is the vanishing polynomial of the domain. In our case z = x^m - 1
-        let mut z = self.gm.into_projective();
-        let p = self.taus_g1[0].into_projective();
-        z.sub_assign(&p);
+        let mut z = self.taum_g1.into_projective();
+        let g1 = self.taus_g1[0].into_projective();
+        z.sub_assign(&g1);
         for (hi, tau_i_g2) in self.params.h.iter().zip(self.taus_g2.iter()) {
             if E::pairing(hi.clone(), self.params.vk.delta_g2) != E::pairing(z, tau_i_g2.clone()) {
                 return Err(SynthesisError::MalformedCrs);
