@@ -4,16 +4,18 @@
 
 use group::{CurveAffine, EncodedPoint, CurveProjective};
 use pairing::{Engine, PairingCurveAffine};
-use ff::Field;
+use ff::{Field, PrimeField};
 
 use crate::{SynthesisError, Circuit, ConstraintSystem, Index, Variable};
 use crate::domain::{EvaluationDomain, Scalar};
-
-use crate::multiexp::SourceBuilder;
+use crate::multiexp::{multiexp, FullDensity, SourceBuilder};
 use crate::multicore::Worker;
+
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{self, Read, Write};
 use std::sync::Arc;
+use std::time::SystemTime;
+use futures::Future;
 
 #[cfg(test)]
 mod tests;
@@ -481,12 +483,10 @@ pub struct ExtendedParameters<E: Engine> {
     pub taum_g1: E::G1Affine,
 }
 
-// Evaluate the polynomial in the exponent
-fn eval1<E: Engine>(
+fn compute_coeffs<E: Engine>(
     poly: &Vec<(E::Fr, usize)>, // polynomial represented as non-zero evaluations in roots of unity
-    powers: &Vec<E::G1Affine>, // powers of the evaluation point in the exponent
     degree: usize // degree of the polynomial
-) -> Result<E::G1, SynthesisError>
+) -> Result<Vec<Scalar<E>>, SynthesisError>
 {
     // Lagrange coefficients of the polynomial
     let mut evals = vec![Scalar::<E>(E::Fr::zero()); degree];
@@ -499,6 +499,15 @@ fn eval1<E: Engine>(
     // Monomial coefficients of the polynomial
     let coeffs = evals.into_coeffs(); // TODO: size
 
+    Ok(coeffs)
+}
+
+// Evaluate the polynomial in the exponent
+fn eval1<E: Engine>(
+    coeffs: &Vec<Scalar<E>>,
+    powers: &Vec<E::G1Affine> // powers of the evaluation point in the exponent
+) -> Result<E::G1, SynthesisError>
+{
     let mut result = E::G1Affine::zero().into_projective();
     for (coeff, power) in coeffs.iter().zip(powers.iter()) {
         result.add_assign(&power.mul(coeff.0));
@@ -509,22 +518,10 @@ fn eval1<E: Engine>(
 
 // TODO: merge with eval1
 fn eval2<E: Engine>(
-    poly: &Vec<(E::Fr, usize)>, // polynomial represented as non-zero evaluations in roots of unity
-    powers: &Vec<E::G2Affine>, // powers of the evaluation point in the exponent
-    degree: usize // degree of the polynomial
+    coeffs: &Vec<Scalar<E>>,
+    powers: &Vec<E::G2Affine> // powers of the evaluation point in the exponent
 ) -> Result<E::G2, SynthesisError>
 {
-    // Lagrange coefficients of the polynomial
-    let mut evals = vec![Scalar::<E>(E::Fr::zero()); degree];
-    // Convert from compact representation
-    for (value, i) in poly {
-        evals[*i] = Scalar::<E>(*value);
-    }
-    let mut evals = EvaluationDomain::from_coeffs(evals)?;
-    evals.ifft(&Worker::new());
-    // Monomial coefficients of the polynomial
-    let coeffs = evals.into_coeffs(); // TODO: size
-
     let mut result = E::G2Affine::zero().into_projective();
     for (coeff, power) in coeffs.iter().zip(powers.iter()) {
         result.add_assign(&power.mul(coeff.0));
@@ -547,6 +544,7 @@ impl<E: Engine> ExtendedParameters<E> {
     //   while the implementation accepts the circuit in R1CS and converts it to a QAP
     // - bases
     pub fn verify<C: Circuit<E>>(&self, circuit: C) -> Result<(), SynthesisError> {
+        let t = SystemTime::now();
 
         // Convert the circuit in R1CS to the QAP in Lagrange base in the roots of unity
         // The additional input and constraints are Groth16/bellman specific, see the code in generator or prover
@@ -575,13 +573,25 @@ impl<E: Engine> ExtendedParameters<E> {
             assembly.enforce(|| "", |lc| lc + Variable(Index::Input(i)), |lc| lc, |lc| lc);
         }
 
-
+        // R1CS -> QAP in Lagrange base
+        println!("synthesis = {}", t.elapsed().unwrap().as_millis());
 
         // Convert the QAP polynomials to monomial base and evaluate them in tau in the exponent
         // Polynomials corresponding to the (public) inputs go first
         // These evaluations are used twice:
         // 1. ai and ci in G1 and bi in G2 are used in sections 4 and 5 of the Fuchsbauer's check
         // 2. ai in G1 and bi in G1 and G2 to validate evaluations provided by bellman CRS that are actually used by the prover
+
+        let t = SystemTime::now();
+
+        let a_coeffs = assembly.at_inputs.iter().chain(assembly.at_aux.iter()).map(|a_evals| compute_coeffs::<E>(a_evals, assembly.num_constraints).unwrap());
+        let b_coeffs = assembly.bt_inputs.iter().chain(assembly.bt_aux.iter()).map(|b_evals| compute_coeffs::<E>(b_evals, assembly.num_constraints).unwrap());
+        let c_coeffs = assembly.ct_inputs.iter().chain(assembly.ct_aux.iter()).map(|c_evals| compute_coeffs::<E>(c_evals, assembly.num_constraints).unwrap());
+
+        println!("iffts = {}", t.elapsed().unwrap().as_millis());
+        let t = SystemTime::now();
+
+        let pool = Worker::new();
 
         let mut a_g1 = vec![E::G1::zero(); assembly.num_inputs + assembly.num_aux];
         let mut b_g1 = vec![E::G1::zero(); assembly.num_inputs + assembly.num_aux];
@@ -591,15 +601,20 @@ impl<E: Engine> ExtendedParameters<E> {
             .zip(b_g1.iter_mut())
             .zip(b_g2.iter_mut())
             .zip(c_g1.iter_mut())
-            .zip(assembly.at_inputs.iter().chain(assembly.at_aux.iter()))
-            .zip(assembly.bt_inputs.iter().chain(assembly.bt_aux.iter()))
-            .zip(assembly.ct_inputs.iter().chain(assembly.ct_aux.iter()))
+            .zip(a_coeffs)
+            .zip(b_coeffs)
+            .zip(c_coeffs)
         {
-            *ai_g1 = eval1::<E>(a_coeffs, &self.taus_g1, assembly.num_constraints)?;
-            *bi_g1 = eval1::<E>(b_coeffs, &self.taus_g1, assembly.num_constraints)?;
-            *bi_g2 = eval2::<E>(b_coeffs, &self.taus_g2, assembly.num_constraints)?;
-            *ci_g1 = eval1::<E>(c_coeffs, &self.taus_g1, assembly.num_constraints)?;
+            *ai_g1 = multiexp(&pool, (self.taus_g1.clone(), 0), FullDensity, Arc::new(a_coeffs.into_iter().map(|s| s.0.into_repr()).collect::<Vec<_>>())).wait().unwrap();
+            let arc = Arc::new(b_coeffs.into_iter().map(|s| s.0.into_repr()).collect::<Vec<_>>());
+            *bi_g1 = multiexp(&pool, (self.taus_g1.clone(), 0), FullDensity, arc.clone()).wait().unwrap();
+            *bi_g2 = multiexp(&pool, (self.taus_g2.clone(), 0), FullDensity, arc).wait().unwrap();
+            *ci_g1 = multiexp(&pool, (self.taus_g1.clone(), 0), FullDensity, Arc::new(c_coeffs.into_iter().map(|s| s.0.into_repr()).collect::<Vec<_>>())).wait().unwrap();
         }
+
+        // QAP in Lagrange base -> blinded QAP in monomial basis ()
+        println!("multiexps = {}", t.elapsed().unwrap().as_millis());
+        let t = SystemTime::now();
 
 
         //TODO: sizes
@@ -711,6 +726,8 @@ impl<E: Engine> ExtendedParameters<E> {
             }
         }
 
+        println!("checks 1-5 = {}", t.elapsed().unwrap().as_millis());
+
         // Check that QAP polynomial evaluations given in the CRS coincide with those computed above
 
 //        assert_eq!(self.params.a.len(), assembly.num_inputs + assembly.num_aux);
@@ -756,21 +773,22 @@ mod test_with_bls12_381 {
             self,
             cs: &mut CS,
         ) -> Result<(), SynthesisError> {
-            let a = cs.alloc(|| "a", || self.a.ok_or(SynthesisError::AssignmentMissing))?;
-            let b = cs.alloc(|| "b", || self.b.ok_or(SynthesisError::AssignmentMissing))?;
-            let c = cs.alloc_input(
-                || "c",
-                || {
-                    let mut a = self.a.ok_or(SynthesisError::AssignmentMissing)?;
-                    let b = self.b.ok_or(SynthesisError::AssignmentMissing)?;
+            for _ in 0..1000 {
+                let a = cs.alloc(|| "a", || self.a.ok_or(SynthesisError::AssignmentMissing))?;
+                let b = cs.alloc(|| "b", || self.b.ok_or(SynthesisError::AssignmentMissing))?;
+                let c = cs.alloc_input(
+                    || "c",
+                    || {
+                        let mut a = self.a.ok_or(SynthesisError::AssignmentMissing)?;
+                        let b = self.b.ok_or(SynthesisError::AssignmentMissing)?;
 
-                    a.mul_assign(&b);
-                    Ok(a)
-                },
-            )?;
+                        a.mul_assign(&b);
+                        Ok(a)
+                    },
+                )?;
 
-            cs.enforce(|| "a*b=c", |lc| lc + a, |lc| lc + b, |lc| lc + c);
-
+                cs.enforce(|| "a*b=c", |lc| lc + a, |lc| lc + b, |lc| lc + c);
+            }
             Ok(())
         }
     }
