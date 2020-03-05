@@ -650,6 +650,7 @@ impl<E: Engine> ExtendedParameters<E> {
 
         // https://eprint.iacr.org/2017/587, p. 26
         let t = SystemTime::now();
+        let pvk = prepare_verifying_key(&self.params.vk); //TODO: return it
 
         // 1
         // P1 != 0
@@ -720,13 +721,26 @@ impl<E: Engine> ExtendedParameters<E> {
             .zip(b_g2.iter().skip(assembly.num_inputs))
             .zip(c_g1.iter().skip(assembly.num_inputs))
         {
-            let lhs = E::pairing(li.clone(), self.params.vk.delta_g2);
-            let mut rhs = E::pairing(ai_g1.clone(), self.params.vk.beta_g2);
-            rhs.mul_assign(&E::pairing(self.params.vk.alpha_g1, bi_g2.clone()));
-            rhs.mul_assign(&E::pairing(ci_g1.clone(), self.g2));
-            if lhs != rhs {
+            let res = E::final_exponentiation(&E::miller_loop(
+                [
+                    // TODO: optimize conversions
+                    (&li.prepare(), &pvk.neg_delta_g2),
+                    (&ai_g1.into_affine().prepare(), &self.params.vk.beta_g2.prepare()),
+                    (&self.params.vk.alpha_g1.prepare(), &bi_g2.into_affine().prepare()),
+                    (&ci_g1.into_affine().prepare(), &self.g2.prepare())
+                ].iter()
+            )).unwrap();
+            if res != E::Fqk::one() {
                 return Err(SynthesisError::MalformedCrs);
             }
+//            let lhs = E::pairing(li.clone(), self.params.vk.delta_g2);
+//            let mut rhs = E::pairing(ai_g1.clone(), self.params.vk.beta_g2);
+//            rhs.mul_assign(&E::pairing(self.params.vk.alpha_g1, bi_g2.clone()));
+//            rhs.mul_assign(&E::pairing(ci_g1.clone(), self.g2));
+//            if lhs != rhs {
+//                return Err(SynthesisError::MalformedCrs);
+//            }
+
         }
 
         // 5
@@ -746,13 +760,25 @@ impl<E: Engine> ExtendedParameters<E> {
             .zip(b_g2.iter())
             .zip(c_g1.iter())
         {
-            let lhs = E::pairing(ici.clone(), self.params.vk.gamma_g2);
-            let mut rhs = E::pairing(ai_g1.clone(), self.params.vk.beta_g2);
-            rhs.mul_assign(&E::pairing(self.params.vk.alpha_g1, bi_g2.clone()));
-            rhs.mul_assign(&E::pairing(ci_g1.clone(), self.g2));
-            if lhs != rhs {
+            let res = E::final_exponentiation(&E::miller_loop(
+                [
+                    // TODO: optimize conversions
+                    (&ici.prepare(), &pvk.neg_gamma_g2),
+                    (&ai_g1.into_affine().prepare(), &self.params.vk.beta_g2.prepare()),
+                    (&self.params.vk.alpha_g1.prepare(), &bi_g2.into_affine().prepare()),
+                    (&ci_g1.into_affine().prepare(), &self.g2.prepare())
+                ].iter()
+            )).unwrap();
+            if res != E::Fqk::one() {
                 return Err(SynthesisError::MalformedCrs);
             }
+//            let lhs = E::pairing(ici.clone(), self.params.vk.gamma_g2);
+//            let mut rhs = E::pairing(ai_g1.clone(), self.params.vk.beta_g2);
+//            rhs.mul_assign(&E::pairing(self.params.vk.alpha_g1, bi_g2.clone()));
+//            rhs.mul_assign(&E::pairing(ci_g1.clone(), self.g2));
+//            if lhs != rhs {
+//                return Err(SynthesisError::MalformedCrs);
+//            }
         }
 
         println!("checks 1-5 = {}", t.elapsed().unwrap().as_millis());
@@ -802,7 +828,7 @@ mod test_with_bls12_381 {
             self,
             cs: &mut CS,
         ) -> Result<(), SynthesisError> {
-            for _ in 0..100 {
+            for _ in 0..10000 {
                 let a = cs.alloc(|| "a", || self.a.ok_or(SynthesisError::AssignmentMissing))?;
                 let b = cs.alloc(|| "b", || self.b.ok_or(SynthesisError::AssignmentMissing))?;
                 let c = cs.alloc_input(
