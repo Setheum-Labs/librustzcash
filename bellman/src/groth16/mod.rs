@@ -7,7 +7,7 @@ use pairing::{Engine, PairingCurveAffine};
 use ff::{Field, PrimeField};
 
 use crate::{SynthesisError, Circuit, ConstraintSystem, Index, Variable};
-use crate::domain::{EvaluationDomain, Scalar};
+use crate::domain::{EvaluationDomain, Scalar, Point};
 use crate::multiexp::{multiexp, FullDensity, SourceBuilder};
 use crate::multicore::Worker;
 
@@ -483,53 +483,6 @@ pub struct ExtendedParameters<E: Engine> {
     pub taum_g1: E::G1Affine,
 }
 
-fn compute_coeffs<E: Engine>(
-    poly: &Vec<(E::Fr, usize)>, // polynomial represented as non-zero evaluations in roots of unity
-    degree: usize // degree of the polynomial
-) -> Result<Vec<Scalar<E>>, SynthesisError>
-{
-    // Lagrange coefficients of the polynomial
-    let mut evals = vec![Scalar::<E>(E::Fr::zero()); degree];
-    // Convert from compact representation
-    for (value, i) in poly {
-        evals[*i] = Scalar::<E>(*value);
-    }
-    let mut evals = EvaluationDomain::from_coeffs(evals)?;
-    evals.ifft(&Worker::new());
-    // Monomial coefficients of the polynomial
-    let coeffs = evals.into_coeffs(); // TODO: size
-
-    Ok(coeffs)
-}
-
-// Evaluate the polynomial in the exponent
-fn eval1<E: Engine>(
-    coeffs: &Vec<Scalar<E>>,
-    powers: &Vec<E::G1Affine> // powers of the evaluation point in the exponent
-) -> Result<E::G1, SynthesisError>
-{
-    let mut result = E::G1Affine::zero().into_projective();
-    for (coeff, power) in coeffs.iter().zip(powers.iter()) {
-        result.add_assign(&power.mul(coeff.0));
-    }
-
-    Ok(result)
-}
-
-// TODO: merge with eval1
-fn eval2<E: Engine>(
-    coeffs: &Vec<Scalar<E>>,
-    powers: &Vec<E::G2Affine> // powers of the evaluation point in the exponent
-) -> Result<E::G2, SynthesisError>
-{
-    let mut result = E::G2Affine::zero().into_projective();
-    for (coeff, power) in coeffs.iter().zip(powers.iter()) {
-        result.add_assign(&power.mul(coeff.0));
-    }
-
-    Ok(result)
-}
-
 impl<E: Engine> ExtendedParameters<E> {
 
     // Checks the CRS for possible subversion by the malicious generator. It does not guarantee subversion soundness,
@@ -538,17 +491,13 @@ impl<E: Engine> ExtendedParameters<E> {
     // This is useful in the case, when the verifier plays the role of the generator and passes the CRS to the prover, who runs this check against it.
     // Then the verifier can be sure in the soundness as only it knows the trapdoor, and the prover is given it's privacy.
     // Follows the procedure from Georg Fuchsbauer, Subversion-zero-knowledge SNARKs (https://eprint.iacr.org/2017/587), p. 26
-    // with the following deviations:
-    // - typos
-    // - in the article the circuit is represented as the set of QAP polynomials,
-    //   while the implementation accepts the circuit in R1CS and converts it to a QAP
-    // - bases
     pub fn verify<C: Circuit<E>>(&self, circuit: C) -> Result<(), SynthesisError> {
+
+        // Convert the circuit in R1CS to the QAP in Lagrange base (QAP polynomials evaluations in the roots of unity)
+        // The additional input and constraints are Groth16/bellman specific, see the code in generator or prover
         let t = SystemTime::now();
 
-        // Convert the circuit in R1CS to the QAP in Lagrange base in the roots of unity
-        // The additional input and constraints are Groth16/bellman specific, see the code in generator or prover
-
+        // TODO: we don't need to distinguish input and auxiliary wires here
         let mut assembly = KeypairAssembly {
             num_inputs: 0,
             num_aux: 0,
@@ -574,53 +523,133 @@ impl<E: Engine> ExtendedParameters<E> {
         }
 
         // R1CS -> QAP in Lagrange base
-        println!("synthesis = {}", t.elapsed().unwrap().as_millis());
+        println!("QAP synthesis = {}", t.elapsed().unwrap().as_millis());
 
-        // Convert the QAP polynomials to monomial base and evaluate them in tau in the exponent
-        // Polynomials corresponding to the (public) inputs go first
-        // These evaluations are used twice:
-        // 1. ai and ci in G1 and bi in G2 are used in sections 4 and 5 of the Fuchsbauer's check
-        // 2. ai in G1 and bi in G1 and G2 to validate evaluations provided by bellman CRS that are actually used by the prover
-
+        // Evaluate the QAP polynomials in point tau in the exponent
         let t = SystemTime::now();
 
-        let a_coeffs = assembly.at_inputs.iter().chain(assembly.at_aux.iter()).map(|a_evals| compute_coeffs::<E>(a_evals, assembly.num_constraints).unwrap());
-        let b_coeffs = assembly.bt_inputs.iter().chain(assembly.bt_aux.iter()).map(|b_evals| compute_coeffs::<E>(b_evals, assembly.num_constraints).unwrap());
-        let c_coeffs = assembly.ct_inputs.iter().chain(assembly.ct_aux.iter()).map(|c_evals| compute_coeffs::<E>(c_evals, assembly.num_constraints).unwrap());
+        // The code bellow is borrowed from https://github.com/ebfull/powersoftau/blob/5429415959175082207fd61c10319e47a6b56e87/src/bin/verify.rs#L162-L225
+        let worker = Worker::new();
 
-        println!("iffts = {}", t.elapsed().unwrap().as_millis());
-        let t = SystemTime::now();
+        let mut g1_coeffs = EvaluationDomain::from_coeffs(
+            self.taus_g1.iter()
+            .map(|e| Point(e.into_projective()))
+            .collect()
+        ).unwrap(); //TODO: remove Arc?
 
-        let pool = Worker::new();
+        let mut g2_coeffs = EvaluationDomain::from_coeffs(
+            self.taus_g2.iter()
+                .map(|e| Point(e.into_projective()))
+                .collect()
+        ).unwrap(); //TODO: remove Arc?
 
-        let mut a_g1 = vec![E::G1::zero(); assembly.num_inputs + assembly.num_aux];
-        let mut b_g1 = vec![E::G1::zero(); assembly.num_inputs + assembly.num_aux];
-        let mut b_g2 = vec![E::G2::zero(); assembly.num_inputs + assembly.num_aux];
-        let mut c_g1 = vec![E::G1::zero(); assembly.num_inputs + assembly.num_aux];
-        for ((((((ai_g1, bi_g1), bi_g2), ci_g1), a_coeffs), b_coeffs), c_coeffs) in a_g1.iter_mut()
-            .zip(b_g1.iter_mut())
-            .zip(b_g2.iter_mut())
-            .zip(c_g1.iter_mut())
-            .zip(a_coeffs)
-            .zip(b_coeffs)
-            .zip(c_coeffs)
-        {
-            *ai_g1 = multiexp(&pool, (self.taus_g1.clone(), 0), FullDensity, Arc::new(a_coeffs.into_iter().map(|s| s.0.into_repr()).collect::<Vec<_>>())).wait().unwrap();
-            let arc = Arc::new(b_coeffs.into_iter().map(|s| s.0.into_repr()).collect::<Vec<_>>());
-            *bi_g1 = multiexp(&pool, (self.taus_g1.clone(), 0), FullDensity, arc.clone()).wait().unwrap();
-            *bi_g2 = multiexp(&pool, (self.taus_g2.clone(), 0), FullDensity, arc).wait().unwrap();
-            *ci_g1 = multiexp(&pool, (self.taus_g1.clone(), 0), FullDensity, Arc::new(c_coeffs.into_iter().map(|s| s.0.into_repr()).collect::<Vec<_>>())).wait().unwrap();
-        }
+        // This converts all of the elements into Lagrange coefficients
+        // for later construction of interpolation polynomials
 
-        // QAP in Lagrange base -> blinded QAP in monomial basis ()
-        println!("multiexps = {}", t.elapsed().unwrap().as_millis());
-        let t = SystemTime::now();
+        g1_coeffs.ifft(&worker);
+        g2_coeffs.ifft(&worker);
+        let g1_coeffs = g1_coeffs.into_coeffs();
+        let g2_coeffs = g2_coeffs.into_coeffs();
 
+        // Remove the Point() wrappers
+        let mut g1_coeffs = g1_coeffs.into_iter()
+            .map(|e| e.0)
+            .collect::<Vec<_>>();
+        let mut g2_coeffs = g2_coeffs.into_iter()
+            .map(|e| e.0)
+            .collect::<Vec<_>>();
+
+        // Batch normalize
+        E::G1::batch_normalization(&mut g1_coeffs);
+        E::G2::batch_normalization(&mut g2_coeffs);
+
+        // And the following code is adapted from https://github.com/ebfull/phase2/blob/58ebd37d9d25b6779320b0ca99b3c484b679b538/src/lib.rs#L503-L636
+
+        // These are `Arc` so that later it'll be easier
+        // to use multiexp during QAP evaluation (which
+        // requires a futures-based API)
+        let coeffs_g1 = Arc::new(g1_coeffs);
+        let coeffs_g2 = Arc::new(g2_coeffs);
+
+        // TODO: simplify KeypairAssembly
+        let at  = assembly.at_inputs.into_iter().chain(assembly.at_aux.into_iter()).collect::<Vec<_>>();
+        let bt  = assembly.bt_inputs.into_iter().chain(assembly.bt_aux.into_iter()).collect::<Vec<_>>();
+        let ct  = assembly.ct_inputs.into_iter().chain(assembly.ct_aux.into_iter()).collect::<Vec<_>>();
+        let num_wires = assembly.num_inputs + assembly.num_aux;
+
+        // Sanity check
+        assert_eq!(num_wires, at.len());
+        assert_eq!(num_wires, bt.len());
+        assert_eq!(num_wires, ct.len());
+
+        let mut a_g1 = vec![E::G1::zero(); num_wires];
+        let mut b_g1 = vec![E::G1::zero(); num_wires];
+        let mut b_g2 = vec![E::G2::zero(); num_wires];
+        let mut c_g1 = vec![E::G1::zero(); num_wires];
+
+        // Evaluate polynomials in multiple threads
+        worker.scope(a_g1.len(), |scope, chunk| {
+            for ((((((a_g1, b_g1), b_g2), c_g1), at), bt), ct) in
+            a_g1.chunks_mut(chunk)
+                .zip(b_g1.chunks_mut(chunk))
+                .zip(b_g2.chunks_mut(chunk))
+                .zip(c_g1.chunks_mut(chunk))
+                .zip(at.chunks(chunk))
+                .zip(bt.chunks(chunk))
+                .zip(ct.chunks(chunk))
+            {
+                let coeffs_g1 = coeffs_g1.clone();
+                let coeffs_g2 = coeffs_g2.clone();
+
+                scope.spawn(move |_| {
+                    for ((((((a_g1, b_g1), b_g2), c_g1), at), bt), ct) in
+                    a_g1.iter_mut()
+                        .zip(b_g1.iter_mut())
+                        .zip(b_g2.iter_mut())
+                        .zip(c_g1.iter_mut())
+                        .zip(at.iter())
+                        .zip(bt.iter())
+                        .zip(ct.iter())
+                    {
+                        for &(coeff, lag) in at {
+                            let mut n = coeffs_g1[lag];
+                            n.mul_assign(coeff);
+                            a_g1.add_assign(&n);
+                        }
+
+                        for &(coeff, lag) in bt {
+                            let mut n = coeffs_g1[lag];
+                            n.mul_assign(coeff);
+                            b_g1.add_assign(&n);
+
+                            let mut n = coeffs_g2[lag];
+                            n.mul_assign(coeff);
+                            b_g2.add_assign(&n);
+                        }
+
+                        for &(coeff, lag) in ct {
+                            let mut n = coeffs_g1[lag];
+                            n.mul_assign(coeff);
+                            c_g1.add_assign(&n);
+                        }
+                    }
+
+                    // Batch normalize
+                    E::G1::batch_normalization(a_g1);
+                    E::G1::batch_normalization(b_g1);
+                    E::G2::batch_normalization(b_g2);
+                    E::G1::batch_normalization(c_g1);
+                });
+            }
+        });
+
+        println!("QAP evaluation = {}", t.elapsed().unwrap().as_millis());
 
         //TODO: sizes
         assert_eq!(self.params.l.len(), assembly.num_aux);
 
         // https://eprint.iacr.org/2017/587, p. 26
+        let t = SystemTime::now();
 
         // 1
         // P1 != 0
@@ -773,7 +802,7 @@ mod test_with_bls12_381 {
             self,
             cs: &mut CS,
         ) -> Result<(), SynthesisError> {
-            for _ in 0..1000 {
+            for _ in 0..100 {
                 let a = cs.alloc(|| "a", || self.a.ok_or(SynthesisError::AssignmentMissing))?;
                 let b = cs.alloc(|| "b", || self.b.ok_or(SynthesisError::AssignmentMissing))?;
                 let c = cs.alloc_input(
