@@ -495,6 +495,74 @@ impl<E: Engine> ExtendedParameters<E> {
     // Follows the procedure from Georg Fuchsbauer, Subversion-zero-knowledge SNARKs (https://eprint.iacr.org/2017/587), p. 26
     pub fn verify<C: Circuit<E>, R: RngCore>(&self, circuit: C, rng: &mut R) -> Result<(), SynthesisError> {
 
+        // https://eprint.iacr.org/2017/587, p. 26
+        let t = SystemTime::now();
+        let pvk = prepare_verifying_key(&self.params.vk); //TODO: return it
+
+        // 1
+        // P1 != 0
+        if self.g1.is_zero() {
+            return Err(SynthesisError::MalformedCrs);
+        }
+        // P2 != 0
+        if self.g2.is_zero() {
+            return Err(SynthesisError::MalformedCrs);
+        }
+
+        // 2
+        // pk_alpha != 0
+        if self.params.vk.alpha_g1.is_zero() {
+            return Err(SynthesisError::MalformedCrs);
+        }
+        // pk_beta != 0
+        if self.params.vk.beta_g1.is_zero() {
+            return Err(SynthesisError::MalformedCrs);
+        }
+        // vk'_gamma != 0
+        if self.params.vk.gamma_g2.is_zero() {
+            return Err(SynthesisError::MalformedCrs);
+        }
+        // pk_delta != 0
+        if self.params.vk.delta_g1.is_zero() {
+            return Err(SynthesisError::MalformedCrs);
+        }
+        // pk_{Z,0} = t(tau)/delta != 0
+        if self.params.h[0].is_zero() {
+            return Err(SynthesisError::MalformedCrs);
+        }
+        // btw, nondegeneracy of beta and delta in G2 follows from the checks in #4
+
+        // 3
+        // pk_{H,0} = P1
+        if self.taus_g1[0] != self.g1 {
+            return Err(SynthesisError::MalformedCrs);
+        }
+        // pk'_{H,0} = P2
+        if self.taus_g2[0] != self.g2 {
+            return Err(SynthesisError::MalformedCrs);
+        }
+        for (tau_i_g1, tau_j_g1) in self.taus_g1.iter().skip(1).zip(self.taus_g1.iter()) {
+            // j = i - 1
+            if E::pairing(tau_i_g1.clone(), self.g2) != E::pairing(tau_j_g1.clone(), self.taus_g2[1]) {
+                return Err(SynthesisError::MalformedCrs);
+            }
+        }
+        for (tau_i_g1, tau_i_g2) in self.taus_g1.iter().zip(self.taus_g2.iter()).skip(1) {
+            if E::pairing(self.g1, tau_i_g2.clone()) != E::pairing(tau_i_g1.clone(), self.g2) {
+                return Err(SynthesisError::MalformedCrs);
+            }
+        }
+
+        // 4
+        // e(P1, pk'_beta) = e(pk_beta, P2)
+        if E::pairing(self.g1, self.params.vk.beta_g2) != E::pairing(self.params.vk.beta_g1, self.g2) {
+            return Err(SynthesisError::MalformedCrs);
+        }
+        // e(P1, pk'_delta) = e(pk_delta, P2)
+        if E::pairing(self.g1, self.params.vk.delta_g2) != E::pairing(self.params.vk.delta_g1, self.g2) {
+            return Err(SynthesisError::MalformedCrs);
+        }
+
         // Convert the circuit in R1CS to the QAP in Lagrange base (QAP polynomials evaluations in the roots of unity)
         // The additional input and constraints are Groth16/bellman specific, see the code in generator or prover
         let t = SystemTime::now();
@@ -650,73 +718,7 @@ impl<E: Engine> ExtendedParameters<E> {
         //TODO: sizes
         assert_eq!(self.params.l.len(), assembly.num_aux);
 
-        // https://eprint.iacr.org/2017/587, p. 26
-        let t = SystemTime::now();
-        let pvk = prepare_verifying_key(&self.params.vk); //TODO: return it
 
-        // 1
-        // P1 != 0
-        if self.g1.is_zero() {
-            return Err(SynthesisError::MalformedCrs);
-        }
-        // P2 != 0
-        if self.g2.is_zero() {
-            return Err(SynthesisError::MalformedCrs);
-        }
-
-        // 2
-        // pk_alpha != 0
-        if self.params.vk.alpha_g1.is_zero() {
-            return Err(SynthesisError::MalformedCrs);
-        }
-        // pk_beta != 0
-        if self.params.vk.beta_g1.is_zero() {
-            return Err(SynthesisError::MalformedCrs);
-        }
-        // vk'_gamma != 0
-        if self.params.vk.gamma_g2.is_zero() {
-            return Err(SynthesisError::MalformedCrs);
-        }
-        // pk_delta != 0
-        if self.params.vk.delta_g1.is_zero() {
-            return Err(SynthesisError::MalformedCrs);
-        }
-        // pk_{Z,0} = t(tau)/delta != 0
-        if self.params.h[0].is_zero() {
-            return Err(SynthesisError::MalformedCrs);
-        }
-        // btw, nondegeneracy of beta and delta in G2 follows from the checks in #4
-
-        // 3
-        // pk_{H,0} = P1
-        if self.taus_g1[0] != self.g1 {
-            return Err(SynthesisError::MalformedCrs);
-        }
-        // pk'_{H,0} = P2
-        if self.taus_g2[0] != self.g2 {
-            return Err(SynthesisError::MalformedCrs);
-        }
-        for (tau_i_g1, tau_j_g1) in self.taus_g1.iter().skip(1).zip(self.taus_g1.iter()) {
-            // j = i - 1
-            if E::pairing(tau_i_g1.clone(), self.g2) != E::pairing(tau_j_g1.clone(), self.taus_g2[1]) {
-                return Err(SynthesisError::MalformedCrs);
-            }
-        }
-        for (tau_i_g1, tau_i_g2) in self.taus_g1.iter().zip(self.taus_g2.iter()).skip(1) {
-            if E::pairing(self.g1, tau_i_g2.clone()) != E::pairing(tau_i_g1.clone(), self.g2) {
-                return Err(SynthesisError::MalformedCrs);
-            }
-        }
-
-        // 4
-        // e(P1, pk'_beta) = e(pk_beta, P2)
-        if E::pairing(self.g1, self.params.vk.beta_g2) != E::pairing(self.params.vk.beta_g1, self.g2) {
-            return Err(SynthesisError::MalformedCrs);
-        }
-        // e(P1, pk'_delta) = e(pk_delta, P2)
-        if E::pairing(self.g1, self.params.vk.delta_g2) != E::pairing(self.params.vk.delta_g1, self.g2) {
-            return Err(SynthesisError::MalformedCrs);
-        }
 
         for (((li, ai_g1), bi_g2), ci_g1) in self.params.l.iter()
             .zip(a_g1.iter().skip(assembly.num_inputs))
