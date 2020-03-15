@@ -494,6 +494,7 @@ impl<E: Engine> ExtendedParameters<E> {
     // Then the verifier can be sure in the soundness as only it knows the trapdoor, and the prover is given it's privacy.
     // Follows the procedure from Georg Fuchsbauer, Subversion-zero-knowledge SNARKs (https://eprint.iacr.org/2017/587), p. 26
     pub fn verify<C: Circuit<E>, R: RngCore>(&self, circuit: C, rng: &mut R) -> Result<(), SynthesisError> {
+        assert_eq!(self.taus_g1.len(), self.taus_g2.len());
 
         // https://eprint.iacr.org/2017/587, p. 26
         let t = SystemTime::now();
@@ -541,17 +542,6 @@ impl<E: Engine> ExtendedParameters<E> {
         if self.taus_g2[0] != self.g2 {
             return Err(SynthesisError::MalformedCrs);
         }
-        for (tau_i_g1, tau_j_g1) in self.taus_g1.iter().skip(1).zip(self.taus_g1.iter()) {
-            // j = i - 1
-            if E::pairing(tau_i_g1.clone(), self.g2) != E::pairing(tau_j_g1.clone(), self.taus_g2[1]) {
-                return Err(SynthesisError::MalformedCrs);
-            }
-        }
-        for (tau_i_g1, tau_i_g2) in self.taus_g1.iter().zip(self.taus_g2.iter()).skip(1) {
-            if E::pairing(self.g1, tau_i_g2.clone()) != E::pairing(tau_i_g1.clone(), self.g2) {
-                return Err(SynthesisError::MalformedCrs);
-            }
-        }
 
         // 4
         // e(P1, pk'_beta) = e(pk_beta, P2)
@@ -561,6 +551,54 @@ impl<E: Engine> ExtendedParameters<E> {
         // e(P1, pk'_delta) = e(pk_delta, P2)
         if E::pairing(self.g1, self.params.vk.delta_g2) != E::pairing(self.params.vk.delta_g1, self.g2) {
             return Err(SynthesisError::MalformedCrs);
+        }
+
+        {
+            let d = self.taus_g1.len() - 1;
+            let worker = Worker::new();
+
+            // TODO: desc
+            // https://hackmd.io/OF8ERbVkSI6kh46WTXOlOw //TODO: permalink
+            let taus_validation = start_timer!(|| "Powers of tau validation");
+
+            let mut p = vec![];
+            let mut q = vec![];
+
+            // TODO: 128-bit scalar multiexps
+            p.resize_with(d, || { E::Fr::random(rng) });
+            q.resize_with(d, || { E::Fr::random(rng) });
+
+            let mut pq = p.clone();
+            pq.iter_mut().zip(q.iter()).map(|(p, q)| { p.add_assign(q) }).collect::<Vec<_>>();
+
+            let p = Arc::new(p.iter().map(|x| { x.into_repr() }).collect::<Vec<_>>());
+            let q = Arc::new(q.iter().map(|x| { x.into_repr() }).collect::<Vec<_>>());
+            let pq = Arc::new(pq.iter().map(|x| { x.into_repr() }).collect::<Vec<_>>());
+
+            let bases_pq = Arc::new(self.taus_g1.clone().into_iter().skip(1).collect()); // tau^1, ..., tau^d in G1
+            let bases_p = Arc::new(self.taus_g1.clone().into_iter().take(d).collect()); // tau^0, ..., tau^(d-1) in G1
+            let bases_q = Arc::new(self.taus_g2.clone().into_iter().skip(1).collect()); // tau^1, ..., tau^d in G2
+
+            let pq_tau_g1 = multiexp(&worker, (bases_pq, 0), FullDensity, pq).wait().unwrap();
+            let p_tau_g1 = multiexp(&worker, (bases_p, 0), FullDensity, p).wait().unwrap();
+            let q_tau_g2 = multiexp(&worker, (bases_q, 0), FullDensity, q).wait().unwrap();
+            //TODO: i guess joining wouldn't help
+
+            let g1 = self.taus_g1[0];
+            let mut neg_g2 = self.taus_g2[0];
+            neg_g2.negate();
+            let tau_g2 = self.taus_g2[1];
+            let res = E::final_exponentiation(&E::miller_loop(
+                [
+                    (&pq_tau_g1.into_affine().prepare(), &neg_g2.prepare()),
+                    (&p_tau_g1.into_affine().prepare(), &tau_g2.prepare()),
+                    (&g1.prepare(), &q_tau_g2.into_affine().prepare())
+                ].iter()
+            )).unwrap();
+            if res != E::Fqk::one() {
+                return Err(SynthesisError::MalformedCrs);
+            }
+            end_timer!(taus_validation);
         }
 
         // Convert the circuit in R1CS to the QAP in Lagrange base (QAP polynomials evaluations in the roots of unity)
