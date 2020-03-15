@@ -17,6 +17,8 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use futures::Future;
 
+use rand_core::RngCore;
+
 #[cfg(test)]
 mod tests;
 
@@ -491,7 +493,7 @@ impl<E: Engine> ExtendedParameters<E> {
     // This is useful in the case, when the verifier plays the role of the generator and passes the CRS to the prover, who runs this check against it.
     // Then the verifier can be sure in the soundness as only it knows the trapdoor, and the prover is given it's privacy.
     // Follows the procedure from Georg Fuchsbauer, Subversion-zero-knowledge SNARKs (https://eprint.iacr.org/2017/587), p. 26
-    pub fn verify<C: Circuit<E>>(&self, circuit: C) -> Result<(), SynthesisError> {
+    pub fn verify<C: Circuit<E>, R: RngCore>(&self, circuit: C, rng: &mut R) -> Result<(), SynthesisError> {
 
         // Convert the circuit in R1CS to the QAP in Lagrange base (QAP polynomials evaluations in the roots of unity)
         // The additional input and constraints are Groth16/bellman specific, see the code in generator or prover
@@ -828,7 +830,7 @@ mod test_with_bls12_381 {
             self,
             cs: &mut CS,
         ) -> Result<(), SynthesisError> {
-            for _ in 0..10000 {
+            for _ in 0..10 {
                 let a = cs.alloc(|| "a", || self.a.ok_or(SynthesisError::AssignmentMissing))?;
                 let b = cs.alloc(|| "b", || self.b.ok_or(SynthesisError::AssignmentMissing))?;
                 let c = cs.alloc_input(
@@ -904,6 +906,6 @@ mod test_with_bls12_381 {
     fn subversion_check() {
         let rng = &mut thread_rng();
         let params = generate_extended_random_parameters::<Bls12, _, _>(MySillyCircuit { a: None, b: None }, rng).unwrap();
-        assert!(params.verify(MySillyCircuit { a: None, b: None }).is_ok());
+        assert!(params.verify(MySillyCircuit { a: None, b: None }, rng).is_ok());
     }
 }
