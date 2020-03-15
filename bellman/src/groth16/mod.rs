@@ -498,8 +498,6 @@ impl<E: Engine> ExtendedParameters<E> {
 
         // https://eprint.iacr.org/2017/587, p. 26
 
-
-
         // 1
         // P1 != 0
         if g1.is_zero() {
@@ -541,6 +539,15 @@ impl<E: Engine> ExtendedParameters<E> {
         // e(P1, pk'_delta) = e(pk_delta, P2)
         if E::pairing(g1, self.params.vk.delta_g2) != E::pairing(self.params.vk.delta_g1, g2) {
             return Err(SynthesisError::MalformedCrs);
+        }
+        // z (aka t in Groth16/bellman) is the vanishing polynomial of the domain. In our case z = x^m - 1
+        // btw, there's a typo un Fuc19, as z should have degree d-1 in his notation
+        let mut z = self.taum_g1.into_projective();
+        z.sub_assign(&g1.into_projective());
+        for (hi, tau_i_g2) in self.params.h.iter().zip(self.taus_g2.iter()) {
+            if E::pairing(hi.clone(), self.params.vk.delta_g2) != E::pairing(z, tau_i_g2.clone()) {
+                return Err(SynthesisError::MalformedCrs);
+            }
         }
 
         {
@@ -773,18 +780,6 @@ impl<E: Engine> ExtendedParameters<E> {
 //                return Err(SynthesisError::MalformedCrs);
 //            }
 
-        }
-
-        // 5
-        // z (aka t in Groth16/bellman) is the vanishing polynomial of the domain. In our case z = x^m - 1
-        // btw, there's a typo un Fuc19, as z should have degree d-1 in his notation
-        let mut z = self.taum_g1.into_projective();
-        let g1 = self.taus_g1[0].into_projective();
-        z.sub_assign(&g1);
-        for (hi, tau_i_g2) in self.params.h.iter().zip(self.taus_g2.iter()) {
-            if E::pairing(hi.clone(), self.params.vk.delta_g2) != E::pairing(z, tau_i_g2.clone()) {
-                return Err(SynthesisError::MalformedCrs);
-            }
         }
 
         for (((ici, ai_g1), bi_g2), ci_g1) in self.params.vk.ic.iter()
