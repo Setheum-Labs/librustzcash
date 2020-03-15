@@ -477,8 +477,8 @@ pub struct ExtendedParameters<E: Engine> {
     pub g1: E::G1Affine,
     pub g2: E::G2Affine,
 
-    pub taus_g1: Arc<Vec<E::G1Affine>>,
-    pub taus_g2: Arc<Vec<E::G2Affine>>,
+    pub taus_g1: Vec<E::G1Affine>,
+    pub taus_g2: Vec<E::G2Affine>,
 
     pub taum_g1: E::G1Affine,
 }
