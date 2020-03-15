@@ -572,8 +572,6 @@ where
 
     Ok(ExtendedParameters {
         params: params,
-        g1: g1,
-        g2: g2,
         taus_g1: taus_g1.into_iter().map(|e| e.into_affine()).collect(),
         taus_g2: taus_g2.into_iter().map(|e| e.into_affine()).collect(),
         taum_g1: taum_g1.into_affine()

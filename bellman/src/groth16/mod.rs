@@ -476,9 +476,6 @@ impl<'a, E: Engine> ParameterSource<E> for &'a Parameters<E> {
 pub struct ExtendedParameters<E: Engine> {
     pub params: Parameters<E>,
 
-    pub g1: E::G1Affine,
-    pub g2: E::G2Affine,
-
     pub taus_g1: Vec<E::G1Affine>,
     pub taus_g2: Vec<E::G2Affine>,
 
@@ -495,18 +492,21 @@ impl<E: Engine> ExtendedParameters<E> {
     // Follows the procedure from Georg Fuchsbauer, Subversion-zero-knowledge SNARKs (https://eprint.iacr.org/2017/587), p. 26
     pub fn verify<C: Circuit<E>, R: RngCore>(&self, circuit: C, rng: &mut R) -> Result<(), SynthesisError> {
         assert_eq!(self.taus_g1.len(), self.taus_g2.len());
+        // generator points
+        let g1 = self.taus_g1[0];
+        let g2 = self.taus_g2[0];
 
         // https://eprint.iacr.org/2017/587, p. 26
-        let t = SystemTime::now();
-        let pvk = prepare_verifying_key(&self.params.vk); //TODO: return it
+
+
 
         // 1
         // P1 != 0
-        if self.g1.is_zero() {
+        if g1.is_zero() {
             return Err(SynthesisError::MalformedCrs);
         }
         // P2 != 0
-        if self.g2.is_zero() {
+        if g2.is_zero() {
             return Err(SynthesisError::MalformedCrs);
         }
 
@@ -533,23 +533,13 @@ impl<E: Engine> ExtendedParameters<E> {
         }
         // btw, nondegeneracy of beta and delta in G2 follows from the checks in #4
 
-        // 3
-        // pk_{H,0} = P1
-        if self.taus_g1[0] != self.g1 {
-            return Err(SynthesisError::MalformedCrs);
-        }
-        // pk'_{H,0} = P2
-        if self.taus_g2[0] != self.g2 {
-            return Err(SynthesisError::MalformedCrs);
-        }
-
         // 4
         // e(P1, pk'_beta) = e(pk_beta, P2)
-        if E::pairing(self.g1, self.params.vk.beta_g2) != E::pairing(self.params.vk.beta_g1, self.g2) {
+        if E::pairing(g1, self.params.vk.beta_g2) != E::pairing(self.params.vk.beta_g1, g2) {
             return Err(SynthesisError::MalformedCrs);
         }
         // e(P1, pk'_delta) = e(pk_delta, P2)
-        if E::pairing(self.g1, self.params.vk.delta_g2) != E::pairing(self.params.vk.delta_g1, self.g2) {
+        if E::pairing(g1, self.params.vk.delta_g2) != E::pairing(self.params.vk.delta_g1, g2) {
             return Err(SynthesisError::MalformedCrs);
         }
 
@@ -756,7 +746,7 @@ impl<E: Engine> ExtendedParameters<E> {
         //TODO: sizes
         assert_eq!(self.params.l.len(), assembly.num_aux);
 
-
+        let pvk = prepare_verifying_key(&self.params.vk); //TODO: return it
 
         for (((li, ai_g1), bi_g2), ci_g1) in self.params.l.iter()
             .zip(a_g1.iter().skip(assembly.num_inputs))
@@ -769,7 +759,7 @@ impl<E: Engine> ExtendedParameters<E> {
                     (&li.prepare(), &pvk.neg_delta_g2),
                     (&ai_g1.into_affine().prepare(), &self.params.vk.beta_g2.prepare()),
                     (&self.params.vk.alpha_g1.prepare(), &bi_g2.into_affine().prepare()),
-                    (&ci_g1.into_affine().prepare(), &self.g2.prepare())
+                    (&ci_g1.into_affine().prepare(), &g2.prepare())
                 ].iter()
             )).unwrap();
             if res != E::Fqk::one() {
@@ -808,7 +798,7 @@ impl<E: Engine> ExtendedParameters<E> {
                     (&ici.prepare(), &pvk.neg_gamma_g2),
                     (&ai_g1.into_affine().prepare(), &self.params.vk.beta_g2.prepare()),
                     (&self.params.vk.alpha_g1.prepare(), &bi_g2.into_affine().prepare()),
-                    (&ci_g1.into_affine().prepare(), &self.g2.prepare())
+                    (&ci_g1.into_affine().prepare(), &g2.prepare())
                 ].iter()
             )).unwrap();
             if res != E::Fqk::one() {
