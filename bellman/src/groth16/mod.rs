@@ -612,6 +612,11 @@ impl<E: Engine> ExtendedParameters<E> {
         let g1 = self.taus_g1[0];
         let g2 = self.taus_g2[0];
 
+        let d = self.taus_g1.len() - 1;
+        let worker = Worker::new();
+
+        let pvk = prepare_verifying_key(&self.params.vk);
+
         // https://eprint.iacr.org/2017/587, p. 26
 
         // 1
@@ -656,20 +661,39 @@ impl<E: Engine> ExtendedParameters<E> {
         if E::pairing(g1, self.params.vk.delta_g2) != E::pairing(self.params.vk.delta_g1, g2) {
             return Err(SynthesisError::MalformedCrs);
         }
+
+        let vanishing_poly = start_timer!(|| "Vanishing polynomial validation");
+
+        let mut r = vec![];
+        r.resize_with(d, || { E::Fr::random(rng).into_repr() });
+        let r = Arc::new(r);
+
+        let bases_g2 = Arc::new(self.taus_g2.clone().into_iter().take(d).collect::<Vec<_>>()); // tau^0, ..., tau^(d-1) in G2
+
+        assert_eq!(self.params.h.len(), d);
+        assert_eq!(bases_g2.len(), d);
+        assert_eq!(r.len(), d);
+
+        let acc_g1 = multiexp(&worker, (self.params.h.clone(), 0), FullDensity, r.clone()).wait().unwrap();
+        let acc_g2 = multiexp(&worker, (bases_g2, 0), FullDensity, r).wait().unwrap();
+
         // z (aka t in Groth16/bellman) is the vanishing polynomial of the domain. In our case z = x^m - 1
         // btw, there's a typo un Fuc19, as z should have degree d-1 in his notation
         let mut z = self.taum_g1.into_projective();
         z.sub_assign(&g1.into_projective());
-        for (hi, tau_i_g2) in self.params.h.iter().zip(self.taus_g2.iter()) {
-            if E::pairing(hi.clone(), self.params.vk.delta_g2) != E::pairing(z, tau_i_g2.clone()) {
-                return Err(SynthesisError::MalformedCrs);
-            }
+
+        let res = E::final_exponentiation(&E::miller_loop(
+            [
+                (&acc_g1.into_affine().prepare(), &pvk.neg_delta_g2),
+                (&z.into_affine().prepare(), &acc_g2.into_affine().prepare())
+            ].iter()
+        )).unwrap();
+        if res != E::Fqk::one() {
+            return Err(SynthesisError::MalformedCrs);
         }
+        end_timer!(vanishing_poly);
 
         {
-            let d = self.taus_g1.len() - 1;
-            let worker = Worker::new();
-
             // TODO: desc
             // https://hackmd.io/OF8ERbVkSI6kh46WTXOlOw //TODO: permalink
             let taus_validation = start_timer!(|| "Powers of tau validation");
@@ -886,8 +910,6 @@ impl<E: Engine> ExtendedParameters<E> {
         //TODO: sizes
         assert_eq!(self.params.l.len(), assembly.num_aux);
 
-        let pvk = prepare_verifying_key(&self.params.vk); //TODO: return it
-
         {
             let worker = Worker::new();
 
@@ -954,7 +976,7 @@ mod test_with_bls12_381 {
             self,
             cs: &mut CS,
         ) -> Result<(), SynthesisError> {
-            for _ in 0..1000 {
+            for _ in 0..100 {
                 let a = cs.alloc(|| "a", || self.a.ok_or(SynthesisError::AssignmentMissing))?;
                 let b = cs.alloc(|| "b", || self.b.ok_or(SynthesisError::AssignmentMissing))?;
                 let c = cs.alloc_input(
