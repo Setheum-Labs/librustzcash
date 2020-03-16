@@ -6,7 +6,7 @@ use group::{CurveAffine, EncodedPoint, CurveProjective};
 use pairing::{Engine, PairingCurveAffine};
 use ff::{Field, PrimeField};
 
-use crate::{SynthesisError, Circuit, ConstraintSystem, Index, Variable};
+use crate::{SynthesisError, Circuit, ConstraintSystem, Index, Variable, LinearCombination};
 use crate::domain::{EvaluationDomain, Scalar, Point};
 use crate::multiexp::{multiexp, FullDensity, SourceBuilder};
 use crate::multicore::Worker;
@@ -470,6 +470,122 @@ impl<'a, E: Engine> ParameterSource<E> for &'a Parameters<E> {
         _: usize,
     ) -> Result<(Self::G2Builder, Self::G2Builder), SynthesisError> {
         Ok(((self.b_g2.clone(), 0), (self.b_g2.clone(), num_inputs)))
+    }
+}
+
+/// This is our assembly structure that we'll use to synthesize the
+/// circuit into a QAP.
+pub struct KeypairAssembly<E: Engine> {
+    num_inputs: usize,
+    num_aux: usize,
+    num_constraints: usize,
+    at_inputs: Vec<Vec<(E::Fr, usize)>>,
+    bt_inputs: Vec<Vec<(E::Fr, usize)>>,
+    ct_inputs: Vec<Vec<(E::Fr, usize)>>,
+    at_aux: Vec<Vec<(E::Fr, usize)>>,
+    bt_aux: Vec<Vec<(E::Fr, usize)>>,
+    ct_aux: Vec<Vec<(E::Fr, usize)>>,
+}
+
+impl<E: Engine> ConstraintSystem<E> for KeypairAssembly<E> {
+    type Root = Self;
+
+    fn alloc<F, A, AR>(&mut self, _: A, _: F) -> Result<Variable, SynthesisError>
+        where
+            F: FnOnce() -> Result<E::Fr, SynthesisError>,
+            A: FnOnce() -> AR,
+            AR: Into<String>,
+    {
+        // There is no assignment, so we don't even invoke the
+        // function for obtaining one.
+
+        let index = self.num_aux;
+        self.num_aux += 1;
+
+        self.at_aux.push(vec![]);
+        self.bt_aux.push(vec![]);
+        self.ct_aux.push(vec![]);
+
+        Ok(Variable(Index::Aux(index)))
+    }
+
+    fn alloc_input<F, A, AR>(&mut self, _: A, _: F) -> Result<Variable, SynthesisError>
+        where
+            F: FnOnce() -> Result<E::Fr, SynthesisError>,
+            A: FnOnce() -> AR,
+            AR: Into<String>,
+    {
+        // There is no assignment, so we don't even invoke the
+        // function for obtaining one.
+
+        let index = self.num_inputs;
+        self.num_inputs += 1;
+
+        self.at_inputs.push(vec![]);
+        self.bt_inputs.push(vec![]);
+        self.ct_inputs.push(vec![]);
+
+        Ok(Variable(Index::Input(index)))
+    }
+
+    fn enforce<A, AR, LA, LB, LC>(&mut self, _: A, a: LA, b: LB, c: LC)
+        where
+            A: FnOnce() -> AR,
+            AR: Into<String>,
+            LA: FnOnce(LinearCombination<E>) -> LinearCombination<E>,
+            LB: FnOnce(LinearCombination<E>) -> LinearCombination<E>,
+            LC: FnOnce(LinearCombination<E>) -> LinearCombination<E>,
+    {
+        fn eval<E: Engine>(
+            l: LinearCombination<E>,
+            inputs: &mut [Vec<(E::Fr, usize)>],
+            aux: &mut [Vec<(E::Fr, usize)>],
+            this_constraint: usize,
+        ) {
+            for (index, coeff) in l.0 {
+                match index {
+                    Variable(Index::Input(id)) => inputs[id].push((coeff, this_constraint)),
+                    Variable(Index::Aux(id)) => aux[id].push((coeff, this_constraint)),
+                }
+            }
+        }
+
+        eval(
+            a(LinearCombination::zero()),
+            &mut self.at_inputs,
+            &mut self.at_aux,
+            self.num_constraints,
+        );
+        eval(
+            b(LinearCombination::zero()),
+            &mut self.bt_inputs,
+            &mut self.bt_aux,
+            self.num_constraints,
+        );
+        eval(
+            c(LinearCombination::zero()),
+            &mut self.ct_inputs,
+            &mut self.ct_aux,
+            self.num_constraints,
+        );
+
+        self.num_constraints += 1;
+    }
+
+    fn push_namespace<NR, N>(&mut self, _: N)
+        where
+            NR: Into<String>,
+            N: FnOnce() -> NR,
+    {
+        // Do nothing; we don't care about namespaces in this context.
+    }
+
+    fn pop_namespace(&mut self) {
+        // Do nothing; we don't care about namespaces in this context.
+    }
+
+    fn get_root(&mut self) -> &mut Self::Root {
+        self
     }
 }
 
