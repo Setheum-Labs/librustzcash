@@ -7,14 +7,13 @@ use pairing::{Engine, PairingCurveAffine};
 use ff::{Field, PrimeField};
 
 use crate::{SynthesisError, Circuit, ConstraintSystem, Index, Variable, LinearCombination};
-use crate::domain::{EvaluationDomain, Scalar, Point};
-use crate::multiexp::{multiexp, FullDensity, SourceBuilder, DensityTracker, QueryDensity};
+use crate::domain::{EvaluationDomain, Point};
+use crate::multiexp::{multiexp, FullDensity, SourceBuilder, DensityTracker};
 use crate::multicore::Worker;
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{self, Read, Write};
 use std::sync::Arc;
-use std::time::SystemTime;
 use futures::Future;
 
 use rand_core::RngCore;
@@ -706,7 +705,9 @@ impl<E: Engine> ExtendedParameters<E> {
             q.resize_with(d, || { E::Fr::random(rng) });
 
             let mut pq = p.clone();
-            pq.iter_mut().zip(q.iter()).map(|(p, q)| { p.add_assign(q) }).collect::<Vec<_>>();
+            for (p, q) in pq.iter_mut().zip(q.iter()) {
+                p.add_assign(q);
+            }
 
             let p = Arc::new(p.iter().map(|x| { x.into_repr() }).collect::<Vec<_>>());
             let q = Arc::new(q.iter().map(|x| { x.into_repr() }).collect::<Vec<_>>());
