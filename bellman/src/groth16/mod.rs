@@ -870,15 +870,15 @@ impl<E: Engine> ExtendedParameters<E> {
         let c_g1_affine = Arc::new(c_g1.iter().filter(|e| !e.is_zero()).map(|e| e.into_affine()).collect::<Vec<_>>());
 
         //TODO: do something!
-        fn get_density<T>(at: Vec<Vec<T>>) -> DensityTracker {
-            let mut a_density = DensityTracker::new();
-            for (i, ati) in at.iter().enumerate() {
-                a_density.add_element();
+        fn get_density<T>(constraints: Vec<Vec<T>>) -> DensityTracker {
+            let mut density = DensityTracker::new();
+            for (i, ati) in constraints.iter().enumerate() {
+                density.add_element();
                 if !ati.is_empty() {
-                    a_density.inc(i);
+                    density.inc(i);
                 }
             }
-            a_density
+            density
         }
 
         println!("QAP evaluation = {}", t.elapsed().unwrap().as_millis());
