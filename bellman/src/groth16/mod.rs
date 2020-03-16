@@ -716,8 +716,8 @@ impl<E: Engine> ExtendedParameters<E> {
 
         // Convert the circuit in R1CS to the QAP in Lagrange base (QAP polynomials evaluations in the roots of unity)
         // The additional input and constraints are Groth16/bellman specific, see the code in generator or prover
-        let t = SystemTime::now();
 
+        let qap_synthesis = start_timer!(|| "QAP synthesis");
         // TODO: we don't need to distinguish input and auxiliary wires here
         let mut assembly = KeypairAssembly {
             num_inputs: 0,
@@ -744,11 +744,11 @@ impl<E: Engine> ExtendedParameters<E> {
         }
 
         // R1CS -> QAP in Lagrange base
-        println!("QAP synthesis = {}", t.elapsed().unwrap().as_millis());
+        end_timer!(qap_synthesis);
 
         // Evaluate the QAP polynomials in point tau in the exponent
-        let t = SystemTime::now();
 
+        let qap_evaluation = start_timer!(|| "QAP evaluation");
         // The code bellow is borrowed from https://github.com/ebfull/powersoftau/blob/5429415959175082207fd61c10319e47a6b56e87/src/bin/verify.rs#L162-L225
         let worker = Worker::new();
 
@@ -864,6 +864,8 @@ impl<E: Engine> ExtendedParameters<E> {
             }
         });
 
+        end_timer!(qap_evaluation);
+
         let a_g1_affine = Arc::new(a_g1.iter().filter(|e| !e.is_zero()).map(|e| e.into_affine()).collect::<Vec<_>>());
         let b_g1_affine = Arc::new(b_g1.iter().filter(|e| !e.is_zero()).map(|e| e.into_affine()).collect::<Vec<_>>());
         let b_g2_affine = Arc::new(b_g2.iter().filter(|e| !e.is_zero()).map(|e| e.into_affine()).collect::<Vec<_>>());
@@ -880,8 +882,6 @@ impl<E: Engine> ExtendedParameters<E> {
             }
             density
         }
-
-        println!("QAP evaluation = {}", t.elapsed().unwrap().as_millis());
 
         //TODO: sizes
         assert_eq!(self.params.l.len(), assembly.num_aux);
@@ -954,7 +954,7 @@ mod test_with_bls12_381 {
             self,
             cs: &mut CS,
         ) -> Result<(), SynthesisError> {
-            for _ in 0..10 {
+            for _ in 0..1000 {
                 let a = cs.alloc(|| "a", || self.a.ok_or(SynthesisError::AssignmentMissing))?;
                 let b = cs.alloc(|| "b", || self.b.ok_or(SynthesisError::AssignmentMissing))?;
                 let c = cs.alloc_input(
