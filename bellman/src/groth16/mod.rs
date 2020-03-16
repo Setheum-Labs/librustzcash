@@ -8,7 +8,7 @@ use ff::{Field, PrimeField};
 
 use crate::{SynthesisError, Circuit, ConstraintSystem, Index, Variable, LinearCombination};
 use crate::domain::{EvaluationDomain, Scalar, Point};
-use crate::multiexp::{multiexp, FullDensity, SourceBuilder};
+use crate::multiexp::{multiexp, FullDensity, SourceBuilder, DensityTracker, QueryDensity};
 use crate::multicore::Worker;
 
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
@@ -864,6 +864,23 @@ impl<E: Engine> ExtendedParameters<E> {
             }
         });
 
+        let a_g1_affine = Arc::new(a_g1.iter().filter(|e| !e.is_zero()).map(|e| e.into_affine()).collect::<Vec<_>>());
+        let b_g1_affine = Arc::new(b_g1.iter().filter(|e| !e.is_zero()).map(|e| e.into_affine()).collect::<Vec<_>>());
+        let b_g2_affine = Arc::new(b_g2.iter().filter(|e| !e.is_zero()).map(|e| e.into_affine()).collect::<Vec<_>>());
+        let c_g1_affine = Arc::new(c_g1.iter().filter(|e| !e.is_zero()).map(|e| e.into_affine()).collect::<Vec<_>>());
+
+        //TODO: do something!
+        fn get_density<T>(at: Vec<Vec<T>>) -> DensityTracker {
+            let mut a_density = DensityTracker::new();
+            for (i, ati) in at.iter().enumerate() {
+                a_density.add_element();
+                if !ati.is_empty() {
+                    a_density.inc(i);
+                }
+            }
+            a_density
+        }
+
         println!("QAP evaluation = {}", t.elapsed().unwrap().as_millis());
 
         //TODO: sizes
@@ -871,60 +888,41 @@ impl<E: Engine> ExtendedParameters<E> {
 
         let pvk = prepare_verifying_key(&self.params.vk); //TODO: return it
 
-        for (((li, ai_g1), bi_g2), ci_g1) in self.params.l.iter()
-            .zip(a_g1.iter().skip(assembly.num_inputs))
-            .zip(b_g2.iter().skip(assembly.num_inputs))
-            .zip(c_g1.iter().skip(assembly.num_inputs))
         {
+            let worker = Worker::new();
+
+            let circuit_validation = start_timer!(|| "circuit validation");
+
+            let mut z = vec![];
+            z.resize_with(num_wires, || { E::Fr::random(rng).into_repr() });
+            let mut z_inp = z.clone();
+            let z_aux = z_inp.split_off( assembly.num_inputs);
+
+            let z = Arc::new(z);
+            let z_inp = Arc::new(z_inp);
+            let z_aux = Arc::new(z_aux);
+
+            let acc_a_g1 = multiexp(&worker, (a_g1_affine, 0), Arc::new(get_density(at)), z.clone()).wait().unwrap();
+            let acc_b_g2 = multiexp(&worker, (b_g2_affine, 0), Arc::new(get_density(bt)), z.clone()).wait().unwrap();
+            let acc_c_g1 = multiexp(&worker, (c_g1_affine, 0), Arc::new(get_density(ct)), z).wait().unwrap();
+            let acc_l_g1 = multiexp(&worker, (self.params.l.clone(), 0), FullDensity, z_aux).wait().unwrap();
+            let acc_ic_g1 = multiexp(&worker, (Arc::new(self.params.vk.ic.clone()), 0), FullDensity, z_inp).wait().unwrap();
+
             let res = E::final_exponentiation(&E::miller_loop(
                 [
-                    // TODO: optimize conversions
-                    (&li.prepare(), &pvk.neg_delta_g2),
-                    (&ai_g1.into_affine().prepare(), &self.params.vk.beta_g2.prepare()),
-                    (&self.params.vk.alpha_g1.prepare(), &bi_g2.into_affine().prepare()),
-                    (&ci_g1.into_affine().prepare(), &g2.prepare())
+                    (&acc_a_g1.into_affine().prepare(), &self.params.vk.beta_g2.prepare()),
+                    (&self.params.vk.alpha_g1.prepare(), &acc_b_g2.into_affine().prepare()),
+                    (&acc_c_g1.into_affine().prepare(), &g2.prepare()),
+                    (&acc_l_g1.into_affine().prepare(), &pvk.neg_delta_g2),
+                    (&acc_ic_g1.into_affine().prepare(), &pvk.neg_gamma_g2)
                 ].iter()
             )).unwrap();
             if res != E::Fqk::one() {
                 return Err(SynthesisError::MalformedCrs);
             }
-//            let lhs = E::pairing(li.clone(), self.params.vk.delta_g2);
-//            let mut rhs = E::pairing(ai_g1.clone(), self.params.vk.beta_g2);
-//            rhs.mul_assign(&E::pairing(self.params.vk.alpha_g1, bi_g2.clone()));
-//            rhs.mul_assign(&E::pairing(ci_g1.clone(), self.g2));
-//            if lhs != rhs {
-//                return Err(SynthesisError::MalformedCrs);
-//            }
 
+            end_timer!(circuit_validation);
         }
-
-        for (((ici, ai_g1), bi_g2), ci_g1) in self.params.vk.ic.iter()
-            .zip(a_g1.iter())
-            .zip(b_g2.iter())
-            .zip(c_g1.iter())
-        {
-            let res = E::final_exponentiation(&E::miller_loop(
-                [
-                    // TODO: optimize conversions
-                    (&ici.prepare(), &pvk.neg_gamma_g2),
-                    (&ai_g1.into_affine().prepare(), &self.params.vk.beta_g2.prepare()),
-                    (&self.params.vk.alpha_g1.prepare(), &bi_g2.into_affine().prepare()),
-                    (&ci_g1.into_affine().prepare(), &g2.prepare())
-                ].iter()
-            )).unwrap();
-            if res != E::Fqk::one() {
-                return Err(SynthesisError::MalformedCrs);
-            }
-//            let lhs = E::pairing(ici.clone(), self.params.vk.gamma_g2);
-//            let mut rhs = E::pairing(ai_g1.clone(), self.params.vk.beta_g2);
-//            rhs.mul_assign(&E::pairing(self.params.vk.alpha_g1, bi_g2.clone()));
-//            rhs.mul_assign(&E::pairing(ci_g1.clone(), self.g2));
-//            if lhs != rhs {
-//                return Err(SynthesisError::MalformedCrs);
-//            }
-        }
-
-        println!("checks 1-5 = {}", t.elapsed().unwrap().as_millis());
 
         // Check that QAP polynomial evaluations given in the CRS coincide with those computed above
 
