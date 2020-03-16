@@ -902,8 +902,8 @@ impl<E: Engine> ExtendedParameters<E> {
             let z_inp = Arc::new(z_inp);
             let z_aux = Arc::new(z_aux);
 
-            let acc_a_g1 = multiexp(&worker, (a_g1_affine, 0), Arc::new(get_density(at)), z.clone()).wait().unwrap();
-            let acc_b_g2 = multiexp(&worker, (b_g2_affine, 0), Arc::new(get_density(bt)), z.clone()).wait().unwrap();
+            let acc_a_g1 = multiexp(&worker, (a_g1_affine.clone(), 0), Arc::new(get_density(at)), z.clone()).wait().unwrap();
+            let acc_b_g2 = multiexp(&worker, (b_g2_affine.clone(), 0), Arc::new(get_density(bt)), z.clone()).wait().unwrap();
             let acc_c_g1 = multiexp(&worker, (c_g1_affine, 0), Arc::new(get_density(ct)), z).wait().unwrap();
             let acc_l_g1 = multiexp(&worker, (self.params.l.clone(), 0), FullDensity, z_aux).wait().unwrap();
             let acc_ic_g1 = multiexp(&worker, (Arc::new(self.params.vk.ic.clone()), 0), FullDensity, z_inp).wait().unwrap();
@@ -925,25 +925,10 @@ impl<E: Engine> ExtendedParameters<E> {
         }
 
         // Check that QAP polynomial evaluations given in the CRS coincide with those computed above
-
-//        assert_eq!(self.params.a.len(), assembly.num_inputs + assembly.num_aux);
-//        assert_eq!(self.params.b_g1.l en(), assembly.num_inputs + assembly.num_aux);
-//        assert_eq!(self.params.b_g2.len(), assembly.num_inputs + assembly.num_aux);
-
-        // TODO: filter zero evaluations at the very beginning
-        for (((((ai_g1, bi_g1), bi_g2), crs_ai_g1), crs_bi_g1), crs_bi_g2) in a_g1.iter().filter(|e| !e.is_zero())
-            .zip(b_g1.iter().filter(|e| !e.is_zero()))
-            .zip(b_g2.iter().filter(|e| !e.is_zero()))
-            .zip(self.params.a.iter())
-            .zip(self.params.b_g1.iter())
-            .zip(self.params.b_g2.iter())
-        {
-            if ai_g1.into_affine() != *crs_ai_g1
-                || bi_g1.into_affine() != *crs_bi_g1
-                || bi_g2.into_affine() != *crs_bi_g2 {
-                return Err(SynthesisError::MalformedCrs);
-            }
-        }
+        // TODO: return polys
+        assert_eq!(a_g1_affine, self.params.a);
+        assert_eq!(b_g1_affine, self.params.b_g1);
+        assert_eq!(b_g2_affine, self.params.b_g2);
 
         Ok(())
     }
