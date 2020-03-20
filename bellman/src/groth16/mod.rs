@@ -17,6 +17,7 @@ use std::sync::Arc;
 use futures::Future;
 
 use rand_core::RngCore;
+use std::ops::{AddAssign, SubAssign, Neg};
 
 #[cfg(test)]
 mod tests;
@@ -673,13 +674,13 @@ impl<E: Engine> ExtendedParameters<E> {
         assert_eq!(bases_g2.len(), d);
         assert_eq!(r.len(), d);
 
-        let acc_g1 = multiexp(&worker, (self.params.h.clone(), 0), FullDensity, r.clone()).wait().unwrap();
-        let acc_g2 = multiexp(&worker, (bases_g2, 0), FullDensity, r).wait().unwrap();
+        let acc_g1: E::G1 = multiexp(&worker, (self.params.h.clone(), 0), FullDensity, r.clone()).wait().unwrap();
+        let acc_g2: E::G2 = multiexp(&worker, (bases_g2, 0), FullDensity, r).wait().unwrap();
 
         // z (aka t in Groth16/bellman) is the vanishing polynomial of the domain. In our case z = x^m - 1
         // btw, there's a typo un Fuc19, as z should have degree d-1 in his notation
         let mut z = self.taum_g1.into_projective();
-        z.sub_assign(&g1.into_projective());
+        SubAssign::<&E::G1>::sub_assign(&mut z, &g1.into_projective());
 
         let res = E::final_exponentiation(&E::miller_loop(
             [
@@ -717,14 +718,13 @@ impl<E: Engine> ExtendedParameters<E> {
             let bases_p = Arc::new(self.taus_g1.clone().into_iter().take(d).collect()); // tau^0, ..., tau^(d-1) in G1
             let bases_q = Arc::new(self.taus_g2.clone().into_iter().skip(1).collect()); // tau^1, ..., tau^d in G2
 
-            let pq_tau_g1 = multiexp(&worker, (bases_pq, 0), FullDensity, pq).wait().unwrap();
-            let p_tau_g1 = multiexp(&worker, (bases_p, 0), FullDensity, p).wait().unwrap();
-            let q_tau_g2 = multiexp(&worker, (bases_q, 0), FullDensity, q).wait().unwrap();
+            let pq_tau_g1: E::G1 = multiexp(&worker, (bases_pq, 0), FullDensity, pq).wait().unwrap();
+            let p_tau_g1: E::G1 = multiexp(&worker, (bases_p, 0), FullDensity, p).wait().unwrap();
+            let q_tau_g2: E::G2 = multiexp(&worker, (bases_q, 0), FullDensity, q).wait().unwrap();
             //TODO: i guess joining wouldn't help
 
             let g1 = self.taus_g1[0];
-            let mut neg_g2 = self.taus_g2[0];
-            neg_g2.negate();
+            let neg_g2 = self.taus_g2[0].neg();
             let tau_g2 = self.taus_g2[1];
             let res = E::final_exponentiation(&E::miller_loop(
                 [
@@ -860,23 +860,23 @@ impl<E: Engine> ExtendedParameters<E> {
                         for &(coeff, lag) in at {
                             let mut n = coeffs_g1[lag];
                             n.mul_assign(coeff);
-                            a_g1.add_assign(&n);
+                            AddAssign::<&E::G1>::add_assign(a_g1, &n);
                         }
 
                         for &(coeff, lag) in bt {
                             let mut n = coeffs_g1[lag];
                             n.mul_assign(coeff);
-                            b_g1.add_assign(&n);
+                            AddAssign::<&E::G1>::add_assign(b_g1, &n);
 
                             let mut n = coeffs_g2[lag];
                             n.mul_assign(coeff);
-                            b_g2.add_assign(&n);
+                            AddAssign::<&E::G2>::add_assign(b_g2, &n);
                         }
 
                         for &(coeff, lag) in ct {
                             let mut n = coeffs_g1[lag];
                             n.mul_assign(coeff);
-                            c_g1.add_assign(&n);
+                            AddAssign::<&E::G1>::add_assign(c_g1, &n);
                         }
                     }
 
@@ -925,11 +925,11 @@ impl<E: Engine> ExtendedParameters<E> {
             let z_inp = Arc::new(z_inp);
             let z_aux = Arc::new(z_aux);
 
-            let acc_a_g1 = multiexp(&worker, (a_g1_affine.clone(), 0), Arc::new(get_density(at)), z.clone()).wait().unwrap();
-            let acc_b_g2 = multiexp(&worker, (b_g2_affine.clone(), 0), Arc::new(get_density(bt)), z.clone()).wait().unwrap();
-            let acc_c_g1 = multiexp(&worker, (c_g1_affine, 0), Arc::new(get_density(ct)), z).wait().unwrap();
-            let acc_l_g1 = multiexp(&worker, (self.params.l.clone(), 0), FullDensity, z_aux).wait().unwrap();
-            let acc_ic_g1 = multiexp(&worker, (Arc::new(self.params.vk.ic.clone()), 0), FullDensity, z_inp).wait().unwrap();
+            let acc_a_g1: E::G1 = multiexp(&worker, (a_g1_affine.clone(), 0), Arc::new(get_density(at)), z.clone()).wait().unwrap();
+            let acc_b_g2: E::G2 = multiexp(&worker, (b_g2_affine.clone(), 0), Arc::new(get_density(bt)), z.clone()).wait().unwrap();
+            let acc_c_g1: E::G1 = multiexp(&worker, (c_g1_affine, 0), Arc::new(get_density(ct)), z).wait().unwrap();
+            let acc_l_g1: E::G1 = multiexp(&worker, (self.params.l.clone(), 0), FullDensity, z_aux).wait().unwrap();
+            let acc_ic_g1: E::G1 = multiexp(&worker, (Arc::new(self.params.vk.ic.clone()), 0), FullDensity, z_inp).wait().unwrap();
 
             let res = E::final_exponentiation(&E::miller_loop(
                 [
