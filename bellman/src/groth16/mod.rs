@@ -266,6 +266,50 @@ impl<E: Engine> PartialEq for Parameters<E> {
     }
 }
 
+fn read_g1<R: Read, E: Engine>(reader: &mut R, checked: bool) -> io::Result<E::G1Affine> {
+    let mut repr = <E::G1Affine as CurveAffine>::Uncompressed::empty();
+    reader.read_exact(repr.as_mut())?;
+
+    if checked {
+        repr.into_affine()
+    } else {
+        repr.into_affine_unchecked()
+    }
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        .and_then(|e| {
+            if e.is_zero() {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "point at infinity",
+                ))
+            } else {
+                Ok(e)
+            }
+        })
+}
+
+fn read_g2<R: Read, E: Engine>(reader: &mut R, checked: bool) -> io::Result<E::G2Affine> {
+    let mut repr = <E::G2Affine as CurveAffine>::Uncompressed::empty();
+    reader.read_exact(repr.as_mut())?;
+
+    if checked {
+        repr.into_affine()
+    } else {
+        repr.into_affine_unchecked()
+    }
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        .and_then(|e| {
+            if e.is_zero() {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "point at infinity",
+                ))
+            } else {
+                Ok(e)
+            }
+        })
+}
+
 impl<E: Engine> Parameters<E> {
     pub fn write<W: Write>(&self, mut writer: W) -> io::Result<()> {
         self.vk.write(&mut writer)?;
@@ -299,50 +343,6 @@ impl<E: Engine> Parameters<E> {
     }
 
     pub fn read<R: Read>(mut reader: R, checked: bool) -> io::Result<Self> {
-        let read_g1 = |reader: &mut R| -> io::Result<E::G1Affine> {
-            let mut repr = <E::G1Affine as CurveAffine>::Uncompressed::empty();
-            reader.read_exact(repr.as_mut())?;
-
-            if checked {
-                repr.into_affine()
-            } else {
-                repr.into_affine_unchecked()
-            }
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
-            .and_then(|e| {
-                if e.is_zero() {
-                    Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "point at infinity",
-                    ))
-                } else {
-                    Ok(e)
-                }
-            })
-        };
-
-        let read_g2 = |reader: &mut R| -> io::Result<E::G2Affine> {
-            let mut repr = <E::G2Affine as CurveAffine>::Uncompressed::empty();
-            reader.read_exact(repr.as_mut())?;
-
-            if checked {
-                repr.into_affine()
-            } else {
-                repr.into_affine_unchecked()
-            }
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
-            .and_then(|e| {
-                if e.is_zero() {
-                    Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "point at infinity",
-                    ))
-                } else {
-                    Ok(e)
-                }
-            })
-        };
-
         let vk = VerifyingKey::<E>::read(&mut reader)?;
 
         let mut h = vec![];
@@ -354,35 +354,35 @@ impl<E: Engine> Parameters<E> {
         {
             let len = reader.read_u32::<BigEndian>()? as usize;
             for _ in 0..len {
-                h.push(read_g1(&mut reader)?);
+                h.push(read_g1::<R, E>(&mut reader, checked)?);
             }
         }
 
         {
             let len = reader.read_u32::<BigEndian>()? as usize;
             for _ in 0..len {
-                l.push(read_g1(&mut reader)?);
+                l.push(read_g1::<R, E>(&mut reader, checked)?);
             }
         }
 
         {
             let len = reader.read_u32::<BigEndian>()? as usize;
             for _ in 0..len {
-                a.push(read_g1(&mut reader)?);
+                a.push(read_g1::<R, E>(&mut reader, checked)?);
             }
         }
 
         {
             let len = reader.read_u32::<BigEndian>()? as usize;
             for _ in 0..len {
-                b_g1.push(read_g1(&mut reader)?);
+                b_g1.push(read_g1::<R, E>(&mut reader, checked)?);
             }
         }
 
         {
             let len = reader.read_u32::<BigEndian>()? as usize;
             for _ in 0..len {
-                b_g2.push(read_g2(&mut reader)?);
+                b_g2.push(read_g2::<R, E>(&mut reader, checked)?);
             }
         }
 
