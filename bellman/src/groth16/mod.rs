@@ -598,6 +598,15 @@ pub struct ExtendedParameters<E: Engine> {
     pub taum_g1: E::G1Affine,
 }
 
+impl<E: Engine> PartialEq for ExtendedParameters<E> {
+    fn eq(&self, other: &Self) -> bool {
+        self.params == other.params
+            && self.taus_g1 == other.taus_g1
+            && self.taus_g2 == other.taus_g2
+            && self.taum_g1 == other.taum_g1
+    }
+}
+
 impl<E: Engine> ExtendedParameters<E> {
 
     // Checks the CRS for possible subversion by the malicious generator. It does not guarantee subversion soundness,
@@ -955,6 +964,54 @@ impl<E: Engine> ExtendedParameters<E> {
 
         Ok(())
     }
+
+    pub fn write<W: Write>(&self, mut writer: W) -> io::Result<()> {
+        self.params.write(&mut writer)?;
+
+        writer.write_u32::<BigEndian>(self.taus_g1.len() as u32)?;
+        for g in &self.taus_g1[..] {
+            writer.write_all(g.into_uncompressed().as_ref())?;
+        }
+
+        writer.write_u32::<BigEndian>(self.taus_g2.len() as u32)?;
+        for g in &self.taus_g2[..] {
+            writer.write_all(g.into_uncompressed().as_ref())?;
+        }
+
+        writer.write_all(self.taum_g1.into_uncompressed().as_ref())?;
+
+        Ok(())
+    }
+
+    pub fn read<R: Read>(mut reader: R, checked: bool) -> io::Result<Self> {
+        let params = Parameters::<E>::read(&mut reader, checked)?;
+
+        let mut taus_g1 = vec![];
+        let mut taus_g2 = vec![];
+
+        {
+            let len = reader.read_u32::<BigEndian>()? as usize;
+            for _ in 0..len {
+                taus_g1.push(read_g1::<R, E>(&mut reader, checked)?);
+            }
+        }
+
+        {
+            let len = reader.read_u32::<BigEndian>()? as usize;
+            for _ in 0..len {
+                taus_g2.push(read_g2::<R, E>(&mut reader, checked)?);
+            }
+        }
+
+        let taum_g1 = read_g1::<R, E>(&mut reader, checked)?;
+
+        Ok(ExtendedParameters {
+            params: params,
+            taus_g1: taus_g1,
+            taus_g2: taus_g2,
+            taum_g1: taum_g1
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1045,6 +1102,22 @@ mod test_with_bls12_381 {
             assert!(verify_proof(&pvk, &proof, &[c]).unwrap());
             assert!(!verify_proof(&pvk, &proof, &[a]).unwrap());
         }
+    }
+
+    #[test]
+    fn extended_serialization() {
+        let rng = &mut thread_rng();
+        let params = generate_extended_random_parameters::<Bls12, _, _>(MySillyCircuit { a: None, b: None }, rng).unwrap();
+
+        let mut v = vec![];
+
+        params.write(&mut v).unwrap();
+
+        let de_params = ExtendedParameters::read(&v[..], true).unwrap();
+        assert!(params == de_params);
+
+        let de_params = ExtendedParameters::read(&v[..], false).unwrap();
+        assert!(params == de_params);
     }
 
     #[test]
