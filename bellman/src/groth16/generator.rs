@@ -310,19 +310,21 @@ where
                     let mut g2_wnaf = g2_wnaf.shared();
 
                     scope.spawn(move |_scope| {
+                        let mut taus_g1_proj = vec![E::G1::identity(); taus_g1.len()];
+                        let mut taus_g2_proj = vec![E::G2::identity(); taus_g2.len()];
+
                         // Set values of the taus_g1 to g1^(tau^i)
-                        for ((tau_g1, tau_g2), p) in taus_g1.iter_mut()
-                            .zip(taus_g2.iter_mut())
+                        for ((tau_g1, tau_g2), p) in taus_g1_proj.iter_mut()
+                            .zip(taus_g2_proj.iter_mut())
                             .zip(p.iter()) {
                             // Exponentiate
-                            let exp = p.0.into_repr();
-                            *tau_g1 = g1_wnaf.scalar(exp);
-                            *tau_g2 = g2_wnaf.scalar(exp);
+                            *tau_g1 = g1_wnaf.scalar(&p.0);
+                            *tau_g2 = g2_wnaf.scalar(&p.0);
                         }
 
                         // Batch normalize
-                        E::G1::batch_normalization(taus_g1);
-                        E::G2::batch_normalization(taus_g2);
+                        E::G1::batch_normalize(&taus_g1_proj, taus_g1);
+                        E::G2::batch_normalize(&taus_g2_proj, taus_g2);
                     });
                 }
         });
@@ -363,7 +365,7 @@ where
     let mut taum = powers_of_tau.as_ref()[powers_of_tau.as_ref().len() - 1];
     taum.0.mul_assign(&tau);
     let mut taum_g1 = g1.clone();
-    taum_g1.mul_assign(taum.0.into_repr());
+    MulAssign::<E::Fr>::mul_assign(&mut taum_g1, taum.0);
 
     // Use inverse FFT to convert powers of tau to Lagrange coefficients
     powers_of_tau.ifft(&worker);
@@ -576,8 +578,8 @@ where
 
     Ok(ExtendedParameters {
         params: params,
-        taus_g1: taus_g1.into_iter().map(|e| e.into_affine()).collect(),
-        taus_g2: taus_g2.into_iter().map(|e| e.into_affine()).collect(),
-        taum_g1: taum_g1.into_affine()
+        taus_g1: taus_g1,
+        taus_g2: taus_g2,
+        taum_g1: taum_g1.to_affine()
     })
 }

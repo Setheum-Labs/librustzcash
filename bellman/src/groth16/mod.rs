@@ -2,9 +2,9 @@
 //!
 //! [Groth16]: https://eprint.iacr.org/2016/260
 
-use group::{CurveAffine, CurveProjective};
+use group::{CurveAffine, CurveProjective, Group};
 use pairing::{Engine, PairingCurveAffine};
-use ff::{Field, PrimeField};
+use ff::{Field};
 
 use crate::{SynthesisError, Circuit, ConstraintSystem, Index, Variable, LinearCombination};
 use crate::domain::{EvaluationDomain, Point};
@@ -17,7 +17,7 @@ use std::sync::Arc;
 use futures::Future;
 
 use rand_core::RngCore;
-use std::ops::{AddAssign, SubAssign, Neg};
+use std::ops::{AddAssign, SubAssign, Neg, MulAssign};
 
 #[cfg(test)]
 mod tests;
@@ -262,6 +262,63 @@ impl<E: Engine> PartialEq for Parameters<E> {
     }
 }
 
+fn read_g1<R: Read, E: Engine>(reader: &mut R, checked: bool) -> io::Result<E::G1Affine> {
+    let mut repr = <E::G1Affine as CurveAffine>::Uncompressed::default();
+    reader.read_exact(repr.as_mut())?;
+
+    let affine = if checked {
+        E::G1Affine::from_uncompressed(&repr)
+    } else {
+        E::G1Affine::from_uncompressed_unchecked(&repr)
+    };
+
+    let affine = if affine.is_some().into() {
+        Ok(affine.unwrap())
+    } else {
+        Err(io::Error::new(io::ErrorKind::InvalidData, "invalid G1"))
+    };
+
+    affine.and_then(|e| {
+        if e.is_identity().into() {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "point at infinity",
+            ))
+        } else {
+            Ok(e)
+        }
+    })
+}
+
+
+fn read_g2<R: Read, E: Engine>(reader: &mut R, checked: bool) -> io::Result<E::G2Affine>  {
+    let mut repr = <E::G2Affine as CurveAffine>::Uncompressed::default();
+    reader.read_exact(repr.as_mut())?;
+
+    let affine = if checked {
+        E::G2Affine::from_uncompressed(&repr)
+    } else {
+        E::G2Affine::from_uncompressed_unchecked(&repr)
+    };
+
+    let affine = if affine.is_some().into() {
+        Ok(affine.unwrap())
+    } else {
+        Err(io::Error::new(io::ErrorKind::InvalidData, "invalid G2"))
+    };
+
+    affine.and_then(|e| {
+        if e.is_identity().into() {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "point at infinity",
+            ))
+        } else {
+            Ok(e)
+        }
+    })
+}
+
 impl<E: Engine> Parameters<E> {
     pub fn write<W: Write>(&self, mut writer: W) -> io::Result<()> {
         self.vk.write(&mut writer)?;
@@ -289,81 +346,6 @@ impl<E: Engine> Parameters<E> {
         writer.write_u32::<BigEndian>(self.b_g2.len() as u32)?;
         for g in &self.b_g2[..] {
             writer.write_all(g.to_uncompressed().as_ref())?;
-        }
-
-        Ok(())
-    }
-
-    pub fn read<R: Read>(mut reader: R, checked: bool) -> io::Result<Self> {
-        let read_g1 = |reader: &mut R| -> io::Result<E::G1Affine> {
-            let mut repr = <E::G1Affine as CurveAffine>::Uncompressed::default();
-            reader.read_exact(repr.as_mut())?;
-
-            let affine = if checked {
-                E::G1Affine::from_uncompressed(&repr)
-            } else {
-                E::G1Affine::from_uncompressed_unchecked(&repr)
-            };
-
-            let affine = if affine.is_some().into() {
-                Ok(affine.unwrap())
-            } else {
-                Err(io::Error::new(io::ErrorKind::InvalidData, "invalid G1"))
-            };
-
-            affine.and_then(|e| {
-                if e.is_identity().into() {
-                    Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "point at infinity",
-                    ))
-                } else {
-                    Ok(e)
-                }
-            })
-        };
-
-        let read_g2 = |reader: &mut R| -> io::Result<E::G2Affine> {
-            let mut repr = <E::G2Affine as CurveAffine>::Uncompressed::default();
-            reader.read_exact(repr.as_mut())?;
-
-            let affine = if checked {
-                E::G2Affine::from_uncompressed(&repr)
-            } else {
-                E::G2Affine::from_uncompressed_unchecked(&repr)
-            };
-
-            let affine = if affine.is_some().into() {
-                Ok(affine.unwrap())
-            } else {
-                Err(io::Error::new(io::ErrorKind::InvalidData, "invalid G2"))
-            };
-
-            affine.and_then(|e| {
-                if e.is_identity().into() {
-                    Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "point at infinity",
-                    ))
-                } else {
-                    Ok(e)
-                }
-            })
-        };
-
-        writer.write_u32::<BigEndian>(self.a.len() as u32)?;
-        for g in &self.a[..] {
-            writer.write_all(g.into_uncompressed().as_ref())?;
-        }
-
-        writer.write_u32::<BigEndian>(self.b_g1.len() as u32)?;
-        for g in &self.b_g1[..] {
-            writer.write_all(g.into_uncompressed().as_ref())?;
-        }
-
-        writer.write_u32::<BigEndian>(self.b_g2.len() as u32)?;
-        for g in &self.b_g2[..] {
-            writer.write_all(g.into_uncompressed().as_ref())?;
         }
 
         Ok(())
@@ -657,33 +639,33 @@ impl<E: Engine> ExtendedParameters<E> {
 
         // 1
         // P1 != 0
-        if g1.is_zero() {
+        if g1.is_identity().into() {
             return Err(SynthesisError::MalformedCrs);
         }
         // P2 != 0
-        if g2.is_zero() {
+        if g2.is_identity().into() {
             return Err(SynthesisError::MalformedCrs);
         }
 
         // 2
         // pk_alpha != 0
-        if self.params.vk.alpha_g1.is_zero() {
+        if self.params.vk.alpha_g1.is_identity().into() {
             return Err(SynthesisError::MalformedCrs);
         }
         // pk_beta != 0
-        if self.params.vk.beta_g1.is_zero() {
+        if self.params.vk.beta_g1.is_identity().into() {
             return Err(SynthesisError::MalformedCrs);
         }
         // vk'_gamma != 0
-        if self.params.vk.gamma_g2.is_zero() {
+        if self.params.vk.gamma_g2.is_identity().into() {
             return Err(SynthesisError::MalformedCrs);
         }
         // pk_delta != 0
-        if self.params.vk.delta_g1.is_zero() {
+        if self.params.vk.delta_g1.is_identity().into() {
             return Err(SynthesisError::MalformedCrs);
         }
         // pk_{Z,0} = t(tau)/delta != 0
-        if self.params.h[0].is_zero() {
+        if self.params.h[0].is_identity().into() {
             return Err(SynthesisError::MalformedCrs);
         }
         // btw, nondegeneracy of beta and delta in G2 follows from the checks in #4
@@ -701,7 +683,7 @@ impl<E: Engine> ExtendedParameters<E> {
         let vanishing_poly = start_timer!(|| "Vanishing polynomial validation");
 
         let mut r = vec![];
-        r.resize_with(d, || { E::Fr::random(rng).into_repr() });
+        r.resize_with(d, || { E::Fr::random(rng) });
         let r = Arc::new(r);
 
         let bases_g2 = Arc::new(self.taus_g2.clone().into_iter().take(d).collect::<Vec<_>>()); // tau^0, ..., tau^(d-1) in G2
@@ -715,13 +697,13 @@ impl<E: Engine> ExtendedParameters<E> {
 
         // z (aka t in Groth16/bellman) is the vanishing polynomial of the domain. In our case z = x^m - 1
         // btw, there's a typo un Fuc19, as z should have degree d-1 in his notation
-        let mut z = self.taum_g1.into_projective();
-        SubAssign::<&E::G1>::sub_assign(&mut z, &g1.into_projective());
+        let mut z = self.taum_g1.to_projective();
+        SubAssign::<&E::G1>::sub_assign(&mut z, &g1.to_projective());
 
         let res = E::final_exponentiation(&E::miller_loop(
             [
-                (&acc_g1.into_affine().prepare(), &pvk.neg_delta_g2),
-                (&z.into_affine().prepare(), &acc_g2.into_affine().prepare())
+                (&acc_g1.to_affine().prepare(), &pvk.neg_delta_g2),
+                (&z.to_affine().prepare(), &acc_g2.to_affine().prepare())
             ].iter()
         )).unwrap();
         if res != E::Fqk::one() {
@@ -746,9 +728,9 @@ impl<E: Engine> ExtendedParameters<E> {
                 p.add_assign(q);
             }
 
-            let p = Arc::new(p.iter().map(|x| { x.into_repr() }).collect::<Vec<_>>());
-            let q = Arc::new(q.iter().map(|x| { x.into_repr() }).collect::<Vec<_>>());
-            let pq = Arc::new(pq.iter().map(|x| { x.into_repr() }).collect::<Vec<_>>());
+            let p = Arc::new(p);
+            let q = Arc::new(q);
+            let pq = Arc::new(pq);
 
             let bases_pq = Arc::new(self.taus_g1.clone().into_iter().skip(1).collect()); // tau^1, ..., tau^d in G1
             let bases_p = Arc::new(self.taus_g1.clone().into_iter().take(d).collect()); // tau^0, ..., tau^(d-1) in G1
@@ -764,9 +746,9 @@ impl<E: Engine> ExtendedParameters<E> {
             let tau_g2 = self.taus_g2[1];
             let res = E::final_exponentiation(&E::miller_loop(
                 [
-                    (&pq_tau_g1.into_affine().prepare(), &neg_g2.prepare()),
-                    (&p_tau_g1.into_affine().prepare(), &tau_g2.prepare()),
-                    (&g1.prepare(), &q_tau_g2.into_affine().prepare())
+                    (&pq_tau_g1.to_affine().prepare(), &neg_g2.prepare()),
+                    (&p_tau_g1.to_affine().prepare(), &tau_g2.prepare()),
+                    (&g1.prepare(), &q_tau_g2.to_affine().prepare())
                 ].iter()
             )).unwrap();
             if res != E::Fqk::one() {
@@ -813,15 +795,15 @@ impl<E: Engine> ExtendedParameters<E> {
         // The code bellow is borrowed from https://github.com/ebfull/powersoftau/blob/5429415959175082207fd61c10319e47a6b56e87/src/bin/verify.rs#L162-L225
         let worker = Worker::new();
 
-        let mut g1_coeffs = EvaluationDomain::from_coeffs(
+        let mut g1_coeffs = EvaluationDomain::<E, _>::from_coeffs(
             self.taus_g1.iter()
-            .map(|e| Point(e.into_projective()))
+            .map(|e| Point(e.to_projective()))
             .collect()
         ).unwrap(); //TODO: remove Arc?
 
-        let mut g2_coeffs = EvaluationDomain::from_coeffs(
+        let mut g2_coeffs = EvaluationDomain::<E, _>::from_coeffs(
             self.taus_g2.iter()
-                .map(|e| Point(e.into_projective()))
+                .map(|e| Point(e.to_projective()))
                 .collect()
         ).unwrap(); //TODO: remove Arc?
 
@@ -842,8 +824,10 @@ impl<E: Engine> ExtendedParameters<E> {
             .collect::<Vec<_>>();
 
         // Batch normalize
-        E::G1::batch_normalization(&mut g1_coeffs);
-        E::G2::batch_normalization(&mut g2_coeffs);
+//        let mut g1_coeffs = vec![E::G1Affine::identity(); g1_coeffs_proj.len()];
+//        let mut g2_coeffs = vec![E::G2Affine::identity(); g2_coeffs_proj.len()];
+//        E::G1::batch_normalize(&g1_coeffs_proj, &mut g1_coeffs);
+//        E::G2::batch_normalize(&g2_coeffs_proj, &mut g2_coeffs);
 
         // And the following code is adapted from https://github.com/ebfull/phase2/blob/58ebd37d9d25b6779320b0ca99b3c484b679b538/src/lib.rs#L503-L636
 
@@ -864,10 +848,10 @@ impl<E: Engine> ExtendedParameters<E> {
         assert_eq!(num_wires, bt.len());
         assert_eq!(num_wires, ct.len());
 
-        let mut a_g1 = vec![E::G1::zero(); num_wires];
-        let mut b_g1 = vec![E::G1::zero(); num_wires];
-        let mut b_g2 = vec![E::G2::zero(); num_wires];
-        let mut c_g1 = vec![E::G1::zero(); num_wires];
+        let mut a_g1 = vec![E::G1Affine::identity(); num_wires];
+        let mut b_g1 = vec![E::G1Affine::identity(); num_wires];
+        let mut b_g2 = vec![E::G2Affine::identity(); num_wires];
+        let mut c_g1 = vec![E::G1Affine::identity(); num_wires];
 
         // Evaluate polynomials in multiple threads
         worker.scope(a_g1.len(), |scope, chunk| {
@@ -884,53 +868,58 @@ impl<E: Engine> ExtendedParameters<E> {
                 let coeffs_g2 = coeffs_g2.clone();
 
                 scope.spawn(move |_| {
+                    let mut a_g1_proj = vec![E::G1::identity(); a_g1.len()];
+                    let mut b_g1_proj = vec![E::G1::identity(); b_g1.len()];
+                    let mut b_g2_proj = vec![E::G2::identity(); b_g2.len()];
+                    let mut c_g1_proj = vec![E::G1::identity(); c_g1.len()];
+
                     for ((((((a_g1, b_g1), b_g2), c_g1), at), bt), ct) in
-                    a_g1.iter_mut()
-                        .zip(b_g1.iter_mut())
-                        .zip(b_g2.iter_mut())
-                        .zip(c_g1.iter_mut())
+                    a_g1_proj.iter_mut()
+                        .zip(b_g1_proj.iter_mut())
+                        .zip(b_g2_proj.iter_mut())
+                        .zip(c_g1_proj.iter_mut())
                         .zip(at.iter())
                         .zip(bt.iter())
                         .zip(ct.iter())
                     {
                         for &(coeff, lag) in at {
                             let mut n = coeffs_g1[lag];
-                            n.mul_assign(coeff);
+                            MulAssign::<E::Fr>::mul_assign(&mut n, coeff);
                             AddAssign::<&E::G1>::add_assign(a_g1, &n);
                         }
 
                         for &(coeff, lag) in bt {
                             let mut n = coeffs_g1[lag];
-                            n.mul_assign(coeff);
+                            MulAssign::<E::Fr>::mul_assign(&mut n, coeff);
                             AddAssign::<&E::G1>::add_assign(b_g1, &n);
 
                             let mut n = coeffs_g2[lag];
-                            n.mul_assign(coeff);
+                            MulAssign::<E::Fr>::mul_assign(&mut n, coeff);
                             AddAssign::<&E::G2>::add_assign(b_g2, &n);
                         }
 
                         for &(coeff, lag) in ct {
                             let mut n = coeffs_g1[lag];
-                            n.mul_assign(coeff);
+                            MulAssign::<E::Fr>::mul_assign(&mut n, coeff);
                             AddAssign::<&E::G1>::add_assign(c_g1, &n);
                         }
                     }
 
                     // Batch normalize
-                    E::G1::batch_normalization(a_g1);
-                    E::G1::batch_normalization(b_g1);
-                    E::G2::batch_normalization(b_g2);
-                    E::G1::batch_normalization(c_g1);
+                    E::G1::batch_normalize(&a_g1_proj, a_g1);
+                    E::G1::batch_normalize(&b_g1_proj, b_g1);
+                    E::G2::batch_normalize(&b_g2_proj, b_g2);
+                    E::G1::batch_normalize(&c_g1_proj, c_g1);
                 });
             }
         });
 
         end_timer!(qap_evaluation);
 
-        let a_g1_affine = Arc::new(a_g1.iter().filter(|e| !e.is_zero()).map(|e| e.into_affine()).collect::<Vec<_>>());
-        let b_g1_affine = Arc::new(b_g1.iter().filter(|e| !e.is_zero()).map(|e| e.into_affine()).collect::<Vec<_>>());
-        let b_g2_affine = Arc::new(b_g2.iter().filter(|e| !e.is_zero()).map(|e| e.into_affine()).collect::<Vec<_>>());
-        let c_g1_affine = Arc::new(c_g1.iter().filter(|e| !e.is_zero()).map(|e| e.into_affine()).collect::<Vec<_>>());
+        let a_g1_affine = Arc::new(a_g1.into_iter().filter(|e| bool::from(!e.is_identity())).collect::<Vec<_>>());
+        let b_g1_affine = Arc::new(b_g1.into_iter().filter(|e| bool::from(!e.is_identity())).collect::<Vec<_>>());
+        let b_g2_affine = Arc::new(b_g2.into_iter().filter(|e| bool::from(!e.is_identity())).collect::<Vec<_>>());
+        let c_g1_affine = Arc::new(c_g1.into_iter().filter(|e| bool::from(!e.is_identity())).collect::<Vec<_>>());
 
         //TODO: do something!
         fn get_density<T>(constraints: Vec<Vec<T>>) -> DensityTracker {
@@ -953,7 +942,7 @@ impl<E: Engine> ExtendedParameters<E> {
             let circuit_validation = start_timer!(|| "circuit validation");
 
             let mut z = vec![];
-            z.resize_with(num_wires, || { E::Fr::random(rng).into_repr() });
+            z.resize_with(num_wires, || { E::Fr::random(rng) });
             let mut z_inp = z.clone();
             let z_aux = z_inp.split_off( assembly.num_inputs);
 
@@ -969,11 +958,11 @@ impl<E: Engine> ExtendedParameters<E> {
 
             let res = E::final_exponentiation(&E::miller_loop(
                 [
-                    (&acc_a_g1.into_affine().prepare(), &self.params.vk.beta_g2.prepare()),
-                    (&self.params.vk.alpha_g1.prepare(), &acc_b_g2.into_affine().prepare()),
-                    (&acc_c_g1.into_affine().prepare(), &g2.prepare()),
-                    (&acc_l_g1.into_affine().prepare(), &pvk.neg_delta_g2),
-                    (&acc_ic_g1.into_affine().prepare(), &pvk.neg_gamma_g2)
+                    (&acc_a_g1.to_affine().prepare(), &self.params.vk.beta_g2.prepare()),
+                    (&self.params.vk.alpha_g1.prepare(), &acc_b_g2.to_affine().prepare()),
+                    (&acc_c_g1.to_affine().prepare(), &g2.prepare()),
+                    (&acc_l_g1.to_affine().prepare(), &pvk.neg_delta_g2),
+                    (&acc_ic_g1.to_affine().prepare(), &pvk.neg_gamma_g2)
                 ].iter()
             )).unwrap();
             if res != E::Fqk::one() {
@@ -997,15 +986,15 @@ impl<E: Engine> ExtendedParameters<E> {
 
         writer.write_u32::<BigEndian>(self.taus_g1.len() as u32)?;
         for g in &self.taus_g1[..] {
-            writer.write_all(g.into_uncompressed().as_ref())?;
+            writer.write_all(g.to_uncompressed().as_ref())?;
         }
 
         writer.write_u32::<BigEndian>(self.taus_g2.len() as u32)?;
         for g in &self.taus_g2[..] {
-            writer.write_all(g.into_uncompressed().as_ref())?;
+            writer.write_all(g.to_uncompressed().as_ref())?;
         }
 
-        writer.write_all(self.taum_g1.into_uncompressed().as_ref())?;
+        writer.write_all(self.taum_g1.to_uncompressed().as_ref())?;
 
         Ok(())
     }
