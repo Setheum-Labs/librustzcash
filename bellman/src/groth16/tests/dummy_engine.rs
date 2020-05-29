@@ -1,12 +1,12 @@
-use ff::{Field, PrimeField, PrimeFieldDecodingError, PrimeFieldRepr, ScalarEngine, SqrtField};
-use group::{CurveAffine, CurveProjective, EncodedPoint, GroupDecodingError};
+use ff::{Field, PrimeField, ScalarEngine};
+use group::{CurveAffine, CurveProjective, Group, PrimeGroup};
 use pairing::{Engine, PairingCurveAffine};
 
 use rand_core::RngCore;
-use std::cmp::Ordering;
 use std::fmt;
+use std::iter::Sum;
 use std::num::Wrapping;
-use std::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
+use std::ops::{Add, AddAssign, BitAnd, Mul, MulAssign, Neg, Shr, Sub, SubAssign};
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq, CtOption};
 
 const MODULUS_R: Wrapping<u32> = Wrapping(64513);
@@ -32,6 +32,12 @@ impl fmt::Display for Fr {
     }
 }
 
+impl From<u64> for Fr {
+    fn from(v: u64) -> Fr {
+        Fr(Wrapping((v % MODULUS_R.0 as u64) as u32))
+    }
+}
+
 impl ConditionallySelectable for Fr {
     fn conditional_select(a: &Self, b: &Self, choice: Choice) -> Self {
         Fr(Wrapping(u32::conditional_select(
@@ -39,6 +45,18 @@ impl ConditionallySelectable for Fr {
             &(b.0).0,
             choice,
         )))
+    }
+}
+
+impl Sum for Fr {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(Self::zero(), ::std::ops::Add::add)
+    }
+}
+
+impl<'r> Sum<&'r Fr> for Fr {
+    fn sum<I: Iterator<Item = &'r Fr>>(iter: I) -> Self {
+        iter.fold(Self::zero(), ::std::ops::Add::add)
     }
 }
 
@@ -143,8 +161,25 @@ impl MulAssign for Fr {
     }
 }
 
+impl BitAnd<u64> for Fr {
+    type Output = u64;
+
+    fn bitand(self, rhs: u64) -> u64 {
+        (self.0).0 as u64 & rhs
+    }
+}
+
+impl Shr<u32> for Fr {
+    type Output = Fr;
+
+    fn shr(mut self, rhs: u32) -> Fr {
+        self.0 = Wrapping((self.0).0 >> rhs);
+        self
+    }
+}
+
 impl Field for Fr {
-    fn random<R: RngCore + ?std::marker::Sized>(rng: &mut R) -> Self {
+    fn random<R: RngCore + ?Sized>(rng: &mut R) -> Self {
         Fr(Wrapping(rng.next_u32()) % MODULUS_R)
     }
 
@@ -179,20 +214,14 @@ impl Field for Fr {
         }
     }
 
-    fn frobenius_map(&mut self, _: usize) {
-        // identity
-    }
-}
-
-impl SqrtField for Fr {
     fn sqrt(&self) -> CtOption<Self> {
         // Tonelli-Shank's algorithm for q mod 16 = 1
         // https://eprint.iacr.org/2012/685.pdf (page 12, algorithm 5)
         let mut c = Fr::root_of_unity();
         // r = self^((t + 1) // 2)
-        let mut r = self.pow_vartime([32]);
+        let mut r = self.pow_vartime([32u64]);
         // t = self^t
-        let mut t = self.pow_vartime([63]);
+        let mut t = self.pow_vartime([63u64]);
         let mut m = Fr::S;
 
         while t != <Fr as Field>::one() {
@@ -222,106 +251,61 @@ impl SqrtField for Fr {
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct FrRepr([u64; 1]);
-
-impl Ord for FrRepr {
-    fn cmp(&self, other: &FrRepr) -> Ordering {
-        (self.0)[0].cmp(&(other.0)[0])
-    }
-}
-
-impl PartialOrd for FrRepr {
-    fn partial_cmp(&self, other: &FrRepr) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl fmt::Display for FrRepr {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-        write!(f, "{}", (self.0)[0])
-    }
-}
-
-impl From<u64> for FrRepr {
-    fn from(v: u64) -> FrRepr {
-        FrRepr([v])
-    }
-}
+pub struct FrRepr([u8; 8]);
 
 impl From<Fr> for FrRepr {
     fn from(v: Fr) -> FrRepr {
-        FrRepr([(v.0).0 as u64])
+        FrRepr::from(&v)
     }
 }
 
-impl AsMut<[u64]> for FrRepr {
-    fn as_mut(&mut self) -> &mut [u64] {
+impl<'a> From<&'a Fr> for FrRepr {
+    fn from(v: &'a Fr) -> FrRepr {
+        FrRepr(((v.0).0 as u64).to_le_bytes())
+    }
+}
+
+impl AsMut<[u8]> for FrRepr {
+    fn as_mut(&mut self) -> &mut [u8] {
         &mut self.0[..]
     }
 }
 
-impl AsRef<[u64]> for FrRepr {
-    fn as_ref(&self) -> &[u64] {
+impl AsRef<[u8]> for FrRepr {
+    fn as_ref(&self) -> &[u8] {
         &self.0[..]
     }
 }
 
 impl Default for FrRepr {
     fn default() -> FrRepr {
-        FrRepr::from(0u64)
-    }
-}
-
-impl PrimeFieldRepr for FrRepr {
-    fn sub_noborrow(&mut self, other: &Self) {
-        self.0[0] = self.0[0].wrapping_sub(other.0[0]);
-    }
-    fn add_nocarry(&mut self, other: &Self) {
-        self.0[0] = self.0[0].wrapping_add(other.0[0]);
-    }
-    fn num_bits(&self) -> u32 {
-        64 - self.0[0].leading_zeros()
-    }
-    fn is_zero(&self) -> bool {
-        self.0[0] == 0
-    }
-    fn is_odd(&self) -> bool {
-        !self.is_even()
-    }
-    fn is_even(&self) -> bool {
-        self.0[0] % 2 == 0
-    }
-    fn div2(&mut self) {
-        self.shr(1)
-    }
-    fn shr(&mut self, amt: u32) {
-        self.0[0] >>= amt;
-    }
-    fn mul2(&mut self) {
-        self.shl(1)
-    }
-    fn shl(&mut self, amt: u32) {
-        self.0[0] <<= amt;
+        FrRepr([0; 8])
     }
 }
 
 impl PrimeField for Fr {
     type Repr = FrRepr;
+    type ReprEndianness = byteorder::LittleEndian;
 
     const NUM_BITS: u32 = 16;
     const CAPACITY: u32 = 15;
     const S: u32 = 10;
 
-    fn from_repr(repr: FrRepr) -> Result<Self, PrimeFieldDecodingError> {
-        if repr.0[0] >= (MODULUS_R.0 as u64) {
-            Err(PrimeFieldDecodingError::NotInField)
+    fn from_repr(repr: FrRepr) -> Option<Self> {
+        let v = u64::from_le_bytes(repr.0);
+        if v >= (MODULUS_R.0 as u64) {
+            None
         } else {
-            Ok(Fr(Wrapping(repr.0[0] as u32)))
+            Some(Fr(Wrapping(v as u32)))
         }
     }
 
-    fn into_repr(&self) -> FrRepr {
+    fn to_repr(&self) -> FrRepr {
         FrRepr::from(*self)
+    }
+
+    fn is_odd(&self) -> bool {
+        (self.0).0 % 2 != 0
     }
 
     fn char() -> FrRepr {
@@ -381,49 +365,50 @@ impl Engine for DummyEngine {
     }
 }
 
-impl CurveProjective for Fr {
-    type Affine = Fr;
-    type Base = Fr;
+impl Group for Fr {
+    type Subgroup = Fr;
     type Scalar = Fr;
-    type Engine = DummyEngine;
 
-    fn random<R: RngCore + ?std::marker::Sized>(rng: &mut R) -> Self {
+    fn random<R: RngCore + ?Sized>(rng: &mut R) -> Self {
         <Fr as Field>::random(rng)
     }
 
-    fn zero() -> Self {
+    fn identity() -> Self {
         <Fr as Field>::zero()
     }
 
-    fn one() -> Self {
+    fn generator() -> Self {
         <Fr as Field>::one()
     }
 
-    fn is_zero(&self) -> bool {
-        <Fr as Field>::is_zero(self)
+    fn is_identity(&self) -> Choice {
+        Choice::from(if <Fr as Field>::is_zero(self) { 1 } else { 0 })
     }
 
-    fn batch_normalization(_: &mut [Self]) {}
+    fn double(&self) -> Self {
+        <Fr as Field>::double(self)
+    }
+}
 
-    fn is_normalized(&self) -> bool {
-        true
+impl PrimeGroup for Fr {}
+
+impl CurveProjective for Fr {
+    type Affine = Fr;
+    type Base = Fr;
+
+    fn batch_normalize(p: &[Self], q: &mut [Self::Affine]) {
+        assert_eq!(p.len(), q.len());
+
+        for (p, q) in p.iter().zip(q.iter_mut()) {
+            *q = p.to_affine();
+        }
     }
 
-    fn double(&mut self) {
-        self.0 = <Fr as Field>::double(self).0;
-    }
-
-    fn mul_assign<S: Into<<Self::Scalar as PrimeField>::Repr>>(&mut self, other: S) {
-        let tmp = Fr::from_repr(other.into()).unwrap();
-
-        MulAssign::mul_assign(self, &tmp);
-    }
-
-    fn into_affine(&self) -> Fr {
+    fn to_affine(&self) -> Fr {
         *self
     }
 
-    fn recommended_wnaf_for_scalar(_: <Self::Scalar as PrimeField>::Repr) -> usize {
+    fn recommended_wnaf_for_scalar(_: &Self::Scalar) -> usize {
         3
     }
 
@@ -432,7 +417,7 @@ impl CurveProjective for Fr {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Default)]
 pub struct FakePoint;
 
 impl AsMut<[u8]> for FakePoint {
@@ -447,61 +432,51 @@ impl AsRef<[u8]> for FakePoint {
     }
 }
 
-impl EncodedPoint for FakePoint {
-    type Affine = Fr;
-
-    fn empty() -> Self {
-        unimplemented!()
-    }
-
-    fn size() -> usize {
-        unimplemented!()
-    }
-
-    fn into_affine(&self) -> Result<Self::Affine, GroupDecodingError> {
-        unimplemented!()
-    }
-
-    fn into_affine_unchecked(&self) -> Result<Self::Affine, GroupDecodingError> {
-        unimplemented!()
-    }
-
-    fn from_affine(_: Self::Affine) -> Self {
-        unimplemented!()
-    }
-}
-
 impl CurveAffine for Fr {
     type Compressed = FakePoint;
     type Uncompressed = FakePoint;
     type Projective = Fr;
     type Base = Fr;
     type Scalar = Fr;
-    type Engine = DummyEngine;
 
-    fn zero() -> Self {
+    fn identity() -> Self {
         <Fr as Field>::zero()
     }
 
-    fn one() -> Self {
+    fn generator() -> Self {
         <Fr as Field>::one()
     }
 
-    fn is_zero(&self) -> bool {
-        <Fr as Field>::is_zero(self)
+    fn is_identity(&self) -> Choice {
+        Choice::from(if <Fr as Field>::is_zero(self) { 1 } else { 0 })
     }
 
-    fn mul<S: Into<<Self::Scalar as PrimeField>::Repr>>(&self, other: S) -> Self::Projective {
-        let mut res = *self;
-        let tmp = Fr::from_repr(other.into()).unwrap();
-
-        MulAssign::mul_assign(&mut res, &tmp);
-
-        res
-    }
-
-    fn into_projective(&self) -> Self::Projective {
+    fn to_projective(&self) -> Self::Projective {
         *self
+    }
+
+    fn from_compressed(_bytes: &Self::Compressed) -> CtOption<Self> {
+        unimplemented!()
+    }
+
+    fn from_compressed_unchecked(_bytes: &Self::Compressed) -> CtOption<Self> {
+        unimplemented!()
+    }
+
+    fn to_compressed(&self) -> Self::Compressed {
+        unimplemented!()
+    }
+
+    fn from_uncompressed(_bytes: &Self::Uncompressed) -> CtOption<Self> {
+        unimplemented!()
+    }
+
+    fn from_uncompressed_unchecked(_bytes: &Self::Uncompressed) -> CtOption<Self> {
+        unimplemented!()
+    }
+
+    fn to_uncompressed(&self) -> Self::Uncompressed {
+        unimplemented!()
     }
 }
 

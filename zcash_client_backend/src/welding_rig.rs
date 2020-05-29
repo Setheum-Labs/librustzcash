@@ -36,7 +36,7 @@ fn scan_output(
     let ct = output.ciphertext;
 
     // Increment tree and witnesses
-    let node = Node::new(cmu.into_repr());
+    let node = Node::new(cmu.to_repr());
     for witness in existing_witnesses {
         witness.append(node).unwrap();
     }
@@ -183,7 +183,7 @@ pub fn scan_block(
 
 #[cfg(test)]
 mod tests {
-    use ff::{Field, PrimeField, PrimeFieldRepr};
+    use ff::{Field, PrimeField};
     use pairing::bls12_381::{Bls12, Fr};
     use rand_core::{OsRng, RngCore};
     use zcash_primitives::{
@@ -207,9 +207,7 @@ mod tests {
         };
         let fake_cmu = {
             let fake_cmu = Fr::random(rng);
-            let mut bytes = vec![];
-            fake_cmu.into_repr().write_le(&mut bytes).unwrap();
-            bytes
+            fake_cmu.to_repr().as_ref().to_owned()
         };
         let fake_epk = {
             let mut buffer = vec![0; 64];
@@ -264,8 +262,7 @@ mod tests {
             Memo::default(),
             &mut rng,
         );
-        let mut cmu = vec![];
-        note.cm(&JUBJUB).into_repr().write_le(&mut cmu).unwrap();
+        let cmu = note.cm(&JUBJUB).to_repr().as_ref().to_owned();
         let mut epk = vec![];
         encryptor.epk().write(&mut epk).unwrap();
         let enc_ciphertext = encryptor.encrypt_note_plaintext();

@@ -59,7 +59,7 @@ impl Engine for Bls12 {
     {
         let mut pairs = vec![];
         for &(p, q) in i {
-            if !p.is_zero() && !q.is_zero() {
+            if !p.is_identity() && !q.is_identity() {
                 pairs.push((p, q.coeffs.iter()));
             }
         }
@@ -82,7 +82,7 @@ impl Engine for Bls12 {
         let mut f = Fq12::one();
 
         let mut found_one = false;
-        for i in BitIterator::new(&[BLS_X >> 1]) {
+        for i in BitIterator::<u64, _>::new(&[BLS_X >> 1]) {
             if !found_one {
                 found_one = i;
                 continue;
@@ -168,12 +168,12 @@ impl Engine for Bls12 {
 }
 
 impl G2Prepared {
-    pub fn is_zero(&self) -> bool {
+    pub fn is_identity(&self) -> bool {
         self.infinity
     }
 
     pub fn from_affine(q: G2Affine) -> Self {
-        if q.is_zero() {
+        if q.is_identity().into() {
             return G2Prepared {
                 coeffs: vec![],
                 infinity: true,
@@ -324,7 +324,7 @@ impl G2Prepared {
         let mut r: G2 = q.into();
 
         let mut found_one = false;
-        for i in BitIterator::new([BLS_X >> 1]) {
+        for i in BitIterator::<u64, _>::new([BLS_X >> 1]) {
             if !found_one {
                 found_one = i;
                 continue;

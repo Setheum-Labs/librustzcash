@@ -1,14 +1,15 @@
-use ff::{PrimeField, PrimeFieldRepr};
+use byteorder::{ByteOrder, LittleEndian};
+use ff::PrimeField;
+use std::iter;
 
-use super::CurveProjective;
+use super::{CurveProjective, Group};
 
 /// Replaces the contents of `table` with a w-NAF window table for the given window size.
 pub(crate) fn wnaf_table<G: CurveProjective>(table: &mut Vec<G>, mut base: G, window: usize) {
     table.truncate(0);
     table.reserve(1 << (window - 1));
 
-    let mut dbl = base;
-    dbl.double();
+    let dbl = base.double();
 
     for _ in 0..(1 << (window - 1)) {
         table.push(base);
@@ -16,31 +17,60 @@ pub(crate) fn wnaf_table<G: CurveProjective>(table: &mut Vec<G>, mut base: G, wi
     }
 }
 
-/// Replaces the contents of `wnaf` with the w-NAF representation of a scalar.
-pub(crate) fn wnaf_form<S: PrimeFieldRepr>(wnaf: &mut Vec<i64>, mut c: S, window: usize) {
+/// Replaces the contents of `wnaf` with the w-NAF representation of a little-endian
+/// scalar.
+pub(crate) fn wnaf_form<S: AsRef<[u8]>>(wnaf: &mut Vec<i64>, c: S, window: usize) {
+    // Required by the NAF definition
+    debug_assert!(window >= 2);
+    // Required so that the NAF digits fit in i64
+    debug_assert!(window <= 64);
+
     wnaf.truncate(0);
 
-    while !c.is_zero() {
-        let mut u;
-        if c.is_odd() {
-            u = (c.as_ref()[0] % (1 << (window + 1))) as i64;
+    let bit_len = c.as_ref().len() * 8;
+    let u64_len = (bit_len + 1) / 64;
 
-            if u > (1 << window) {
-                u -= 1 << (window + 1);
-            }
+    let mut c_u64 = vec![0u64; u64_len + 1];
+    LittleEndian::read_u64_into(c.as_ref(), &mut c_u64[0..u64_len]);
 
-            if u > 0 {
-                c.sub_noborrow(&S::from(u as u64));
-            } else {
-                c.add_nocarry(&S::from((-u) as u64));
-            }
+    let width = 1u64 << window;
+    let window_mask = width - 1;
+
+    let mut pos = 0;
+    let mut carry = 0;
+    while pos < bit_len {
+        // Construct a buffer of bits of the scalar, starting at bit `pos`
+        let u64_idx = pos / 64;
+        let bit_idx = pos % 64;
+        let bit_buf = if bit_idx + window < 64 {
+            // This window's bits are contained in a single u64
+            c_u64[u64_idx] >> bit_idx
         } else {
-            u = 0;
+            // Combine the current u64's bits with the bits from the next u64
+            (c_u64[u64_idx] >> bit_idx) | (c_u64[u64_idx + 1] << (64 - bit_idx))
+        };
+
+        // Add the carry into the current window
+        let window_val = carry + (bit_buf & window_mask);
+
+        if window_val & 1 == 0 {
+            // If the window value is even, preserve the carry and emit 0.
+            // Why is the carry preserved?
+            // If carry == 0 and window_val & 1 == 0, then the next carry should be 0
+            // If carry == 1 and window_val & 1 == 0, then bit_buf & 1 == 1 so the next carry should be 1
+            wnaf.push(0);
+            pos += 1;
+        } else {
+            wnaf.push(if window_val < width / 2 {
+                carry = 0;
+                window_val as i64
+            } else {
+                carry = 1;
+                (window_val as i64).wrapping_sub(width as i64)
+            });
+            wnaf.extend(iter::repeat(0).take(window - 1));
+            pos += window;
         }
-
-        wnaf.push(u);
-
-        c.div2();
     }
 }
 
@@ -49,13 +79,13 @@ pub(crate) fn wnaf_form<S: PrimeFieldRepr>(wnaf: &mut Vec<i64>, mut c: S, window
 /// This function must be provided a `table` and `wnaf` that were constructed with
 /// the same window size; otherwise, it may panic or produce invalid results.
 pub(crate) fn wnaf_exp<G: CurveProjective>(table: &[G], wnaf: &[i64]) -> G {
-    let mut result = G::zero();
+    let mut result = G::identity();
 
     let mut found_one = false;
 
     for n in wnaf.iter().rev() {
         if found_one {
-            result.double();
+            result = result.double();
         }
 
         if *n != 0 {
@@ -110,15 +140,12 @@ impl<G: CurveProjective> Wnaf<(), Vec<G>, Vec<i64>> {
 
     /// Given a scalar, compute its wNAF representation and return a `Wnaf` object that can perform
     /// exponentiations with `.base(..)`.
-    pub fn scalar(
-        &mut self,
-        scalar: <<G as CurveProjective>::Scalar as PrimeField>::Repr,
-    ) -> Wnaf<usize, &mut Vec<G>, &[i64]> {
+    pub fn scalar(&mut self, scalar: &<G as Group>::Scalar) -> Wnaf<usize, &mut Vec<G>, &[i64]> {
         // Compute the appropriate window size for the scalar.
-        let window_size = G::recommended_wnaf_for_scalar(scalar);
+        let window_size = G::recommended_wnaf_for_scalar(&scalar);
 
         // Compute the wNAF form of the scalar.
-        wnaf_form(&mut self.scalar, scalar, window_size);
+        wnaf_form(&mut self.scalar, scalar.to_repr(), window_size);
 
         // Return a Wnaf object that mutably borrows the base storage location, but
         // immutably borrows the computed wNAF form scalar location.
@@ -168,14 +195,11 @@ impl<B, S: AsRef<[i64]>> Wnaf<usize, B, S> {
 
 impl<B, S: AsMut<Vec<i64>>> Wnaf<usize, B, S> {
     /// Performs exponentiation given a scalar.
-    pub fn scalar<G: CurveProjective>(
-        &mut self,
-        scalar: <<G as CurveProjective>::Scalar as PrimeField>::Repr,
-    ) -> G
+    pub fn scalar<G: CurveProjective>(&mut self, scalar: &<G as Group>::Scalar) -> G
     where
         B: AsRef<[G]>,
     {
-        wnaf_form(self.scalar.as_mut(), scalar, self.window_size);
+        wnaf_form(self.scalar.as_mut(), scalar.to_repr(), self.window_size);
         wnaf_exp(self.base.as_ref(), self.scalar.as_mut())
     }
 }

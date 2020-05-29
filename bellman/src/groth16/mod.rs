@@ -2,7 +2,7 @@
 //!
 //! [Groth16]: https://eprint.iacr.org/2016/260
 
-use group::{CurveAffine, EncodedPoint, CurveProjective};
+use group::{CurveAffine, CurveProjective};
 use pairing::{Engine, PairingCurveAffine};
 use ff::{Field, PrimeField};
 
@@ -45,23 +45,27 @@ impl<E: Engine> PartialEq for Proof<E> {
 
 impl<E: Engine> Proof<E> {
     pub fn write<W: Write>(&self, mut writer: W) -> io::Result<()> {
-        writer.write_all(self.a.into_compressed().as_ref())?;
-        writer.write_all(self.b.into_compressed().as_ref())?;
-        writer.write_all(self.c.into_compressed().as_ref())?;
+        writer.write_all(self.a.to_compressed().as_ref())?;
+        writer.write_all(self.b.to_compressed().as_ref())?;
+        writer.write_all(self.c.to_compressed().as_ref())?;
 
         Ok(())
     }
 
     pub fn read<R: Read>(mut reader: R) -> io::Result<Self> {
-        let mut g1_repr = <E::G1Affine as CurveAffine>::Compressed::empty();
-        let mut g2_repr = <E::G2Affine as CurveAffine>::Compressed::empty();
+        let read_g1 = |reader: &mut R| -> io::Result<E::G1Affine> {
+            let mut g1_repr = <E::G1Affine as CurveAffine>::Compressed::default();
+            reader.read_exact(g1_repr.as_mut())?;
 
-        reader.read_exact(g1_repr.as_mut())?;
-        let a = g1_repr
-            .into_affine()
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
-            .and_then(|e| {
-                if e.is_zero() {
+            let affine = E::G1Affine::from_compressed(&g1_repr);
+            let affine = if affine.is_some().into() {
+                Ok(affine.unwrap())
+            } else {
+                Err(io::Error::new(io::ErrorKind::InvalidData, "invalid G1"))
+            };
+
+            affine.and_then(|e| {
+                if e.is_identity().into() {
                     Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         "point at infinity",
@@ -69,14 +73,22 @@ impl<E: Engine> Proof<E> {
                 } else {
                     Ok(e)
                 }
-            })?;
+            })
+        };
 
-        reader.read_exact(g2_repr.as_mut())?;
-        let b = g2_repr
-            .into_affine()
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
-            .and_then(|e| {
-                if e.is_zero() {
+        let read_g2 = |reader: &mut R| -> io::Result<E::G2Affine> {
+            let mut g2_repr = <E::G2Affine as CurveAffine>::Compressed::default();
+            reader.read_exact(g2_repr.as_mut())?;
+
+            let affine = E::G2Affine::from_compressed(&g2_repr);
+            let affine = if affine.is_some().into() {
+                Ok(affine.unwrap())
+            } else {
+                Err(io::Error::new(io::ErrorKind::InvalidData, "invalid G2"))
+            };
+
+            affine.and_then(|e| {
+                if e.is_identity().into() {
                     Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         "point at infinity",
@@ -84,22 +96,12 @@ impl<E: Engine> Proof<E> {
                 } else {
                     Ok(e)
                 }
-            })?;
+            })
+        };
 
-        reader.read_exact(g1_repr.as_mut())?;
-        let c = g1_repr
-            .into_affine()
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
-            .and_then(|e| {
-                if e.is_zero() {
-                    Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "point at infinity",
-                    ))
-                } else {
-                    Ok(e)
-                }
-            })?;
+        let a = read_g1(&mut reader)?;
+        let b = read_g2(&mut reader)?;
+        let c = read_g1(&mut reader)?;
 
         Ok(Proof { a, b, c })
     }
@@ -147,73 +149,67 @@ impl<E: Engine> PartialEq for VerifyingKey<E> {
 
 impl<E: Engine> VerifyingKey<E> {
     pub fn write<W: Write>(&self, mut writer: W) -> io::Result<()> {
-        writer.write_all(self.alpha_g1.into_uncompressed().as_ref())?;
-        writer.write_all(self.beta_g1.into_uncompressed().as_ref())?;
-        writer.write_all(self.beta_g2.into_uncompressed().as_ref())?;
-        writer.write_all(self.gamma_g2.into_uncompressed().as_ref())?;
-        writer.write_all(self.delta_g1.into_uncompressed().as_ref())?;
-        writer.write_all(self.delta_g2.into_uncompressed().as_ref())?;
+        writer.write_all(self.alpha_g1.to_uncompressed().as_ref())?;
+        writer.write_all(self.beta_g1.to_uncompressed().as_ref())?;
+        writer.write_all(self.beta_g2.to_uncompressed().as_ref())?;
+        writer.write_all(self.gamma_g2.to_uncompressed().as_ref())?;
+        writer.write_all(self.delta_g1.to_uncompressed().as_ref())?;
+        writer.write_all(self.delta_g2.to_uncompressed().as_ref())?;
         writer.write_u32::<BigEndian>(self.ic.len() as u32)?;
         for ic in &self.ic {
-            writer.write_all(ic.into_uncompressed().as_ref())?;
+            writer.write_all(ic.to_uncompressed().as_ref())?;
         }
 
         Ok(())
     }
 
     pub fn read<R: Read>(mut reader: R) -> io::Result<Self> {
-        let mut g1_repr = <E::G1Affine as CurveAffine>::Uncompressed::empty();
-        let mut g2_repr = <E::G2Affine as CurveAffine>::Uncompressed::empty();
+        let read_g1 = |reader: &mut R| -> io::Result<E::G1Affine> {
+            let mut g1_repr = <E::G1Affine as CurveAffine>::Uncompressed::default();
+            reader.read_exact(g1_repr.as_mut())?;
 
-        reader.read_exact(g1_repr.as_mut())?;
-        let alpha_g1 = g1_repr
-            .into_affine()
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            let affine = E::G1Affine::from_uncompressed(&g1_repr);
+            if affine.is_some().into() {
+                Ok(affine.unwrap())
+            } else {
+                Err(io::Error::new(io::ErrorKind::InvalidData, "invalid G1"))
+            }
+        };
 
-        reader.read_exact(g1_repr.as_mut())?;
-        let beta_g1 = g1_repr
-            .into_affine()
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let read_g2 = |reader: &mut R| -> io::Result<E::G2Affine> {
+            let mut g2_repr = <E::G2Affine as CurveAffine>::Uncompressed::default();
+            reader.read_exact(g2_repr.as_mut())?;
 
-        reader.read_exact(g2_repr.as_mut())?;
-        let beta_g2 = g2_repr
-            .into_affine()
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            let affine = E::G2Affine::from_uncompressed(&g2_repr);
+            if affine.is_some().into() {
+                Ok(affine.unwrap())
+            } else {
+                Err(io::Error::new(io::ErrorKind::InvalidData, "invalid G2"))
+            }
+        };
 
-        reader.read_exact(g2_repr.as_mut())?;
-        let gamma_g2 = g2_repr
-            .into_affine()
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-
-        reader.read_exact(g1_repr.as_mut())?;
-        let delta_g1 = g1_repr
-            .into_affine()
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-
-        reader.read_exact(g2_repr.as_mut())?;
-        let delta_g2 = g2_repr
-            .into_affine()
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let alpha_g1 = read_g1(&mut reader)?;
+        let beta_g1 = read_g1(&mut reader)?;
+        let beta_g2 = read_g2(&mut reader)?;
+        let gamma_g2 = read_g2(&mut reader)?;
+        let delta_g1 = read_g1(&mut reader)?;
+        let delta_g2 = read_g2(&mut reader)?;
 
         let ic_len = reader.read_u32::<BigEndian>()? as usize;
 
         let mut ic = vec![];
 
         for _ in 0..ic_len {
-            reader.read_exact(g1_repr.as_mut())?;
-            let g1 = g1_repr
-                .into_affine()
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
-                .and_then(|e| {
-                    if e.is_zero() {
-                        Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "point at infinity",
-                        ))
-                    } else {
-                        Ok(e)
-                    }
-                })?;
+            let g1 = read_g1(&mut reader).and_then(|e| {
+                if e.is_identity().into() {
+                    Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "point at infinity",
+                    ))
+                } else {
+                    Ok(e)
+                }
+            })?;
 
             ic.push(g1);
         }
@@ -266,63 +262,94 @@ impl<E: Engine> PartialEq for Parameters<E> {
     }
 }
 
-fn read_g1<R: Read, E: Engine>(reader: &mut R, checked: bool) -> io::Result<E::G1Affine> {
-    let mut repr = <E::G1Affine as CurveAffine>::Uncompressed::empty();
-    reader.read_exact(repr.as_mut())?;
-
-    if checked {
-        repr.into_affine()
-    } else {
-        repr.into_affine_unchecked()
-    }
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
-        .and_then(|e| {
-            if e.is_zero() {
-                Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "point at infinity",
-                ))
-            } else {
-                Ok(e)
-            }
-        })
-}
-
-fn read_g2<R: Read, E: Engine>(reader: &mut R, checked: bool) -> io::Result<E::G2Affine> {
-    let mut repr = <E::G2Affine as CurveAffine>::Uncompressed::empty();
-    reader.read_exact(repr.as_mut())?;
-
-    if checked {
-        repr.into_affine()
-    } else {
-        repr.into_affine_unchecked()
-    }
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
-        .and_then(|e| {
-            if e.is_zero() {
-                Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "point at infinity",
-                ))
-            } else {
-                Ok(e)
-            }
-        })
-}
-
 impl<E: Engine> Parameters<E> {
     pub fn write<W: Write>(&self, mut writer: W) -> io::Result<()> {
         self.vk.write(&mut writer)?;
 
         writer.write_u32::<BigEndian>(self.h.len() as u32)?;
         for g in &self.h[..] {
-            writer.write_all(g.into_uncompressed().as_ref())?;
+            writer.write_all(g.to_uncompressed().as_ref())?;
         }
 
         writer.write_u32::<BigEndian>(self.l.len() as u32)?;
         for g in &self.l[..] {
-            writer.write_all(g.into_uncompressed().as_ref())?;
+            writer.write_all(g.to_uncompressed().as_ref())?;
         }
+
+        writer.write_u32::<BigEndian>(self.a.len() as u32)?;
+        for g in &self.a[..] {
+            writer.write_all(g.to_uncompressed().as_ref())?;
+        }
+
+        writer.write_u32::<BigEndian>(self.b_g1.len() as u32)?;
+        for g in &self.b_g1[..] {
+            writer.write_all(g.to_uncompressed().as_ref())?;
+        }
+
+        writer.write_u32::<BigEndian>(self.b_g2.len() as u32)?;
+        for g in &self.b_g2[..] {
+            writer.write_all(g.to_uncompressed().as_ref())?;
+        }
+
+        Ok(())
+    }
+
+    pub fn read<R: Read>(mut reader: R, checked: bool) -> io::Result<Self> {
+        let read_g1 = |reader: &mut R| -> io::Result<E::G1Affine> {
+            let mut repr = <E::G1Affine as CurveAffine>::Uncompressed::default();
+            reader.read_exact(repr.as_mut())?;
+
+            let affine = if checked {
+                E::G1Affine::from_uncompressed(&repr)
+            } else {
+                E::G1Affine::from_uncompressed_unchecked(&repr)
+            };
+
+            let affine = if affine.is_some().into() {
+                Ok(affine.unwrap())
+            } else {
+                Err(io::Error::new(io::ErrorKind::InvalidData, "invalid G1"))
+            };
+
+            affine.and_then(|e| {
+                if e.is_identity().into() {
+                    Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "point at infinity",
+                    ))
+                } else {
+                    Ok(e)
+                }
+            })
+        };
+
+        let read_g2 = |reader: &mut R| -> io::Result<E::G2Affine> {
+            let mut repr = <E::G2Affine as CurveAffine>::Uncompressed::default();
+            reader.read_exact(repr.as_mut())?;
+
+            let affine = if checked {
+                E::G2Affine::from_uncompressed(&repr)
+            } else {
+                E::G2Affine::from_uncompressed_unchecked(&repr)
+            };
+
+            let affine = if affine.is_some().into() {
+                Ok(affine.unwrap())
+            } else {
+                Err(io::Error::new(io::ErrorKind::InvalidData, "invalid G2"))
+            };
+
+            affine.and_then(|e| {
+                if e.is_identity().into() {
+                    Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "point at infinity",
+                    ))
+                } else {
+                    Ok(e)
+                }
+            })
+        };
 
         writer.write_u32::<BigEndian>(self.a.len() as u32)?;
         for g in &self.a[..] {

@@ -20,8 +20,9 @@ pub mod tests;
 
 pub mod bls12_381;
 
-use ff::{Field, PrimeField, ScalarEngine, SqrtField};
-use group::{CurveAffine, CurveOps, CurveOpsOwned, CurveProjective};
+use core::ops::Mul;
+use ff::{Field, PrimeField, ScalarEngine};
+use group::{CurveAffine, CurveProjective, GroupOps, GroupOpsOwned, ScalarMul, ScalarMulOwned};
 use subtle::CtOption;
 
 /// An "engine" is a collection of types (fields, elliptic curve groups, etc.)
@@ -29,42 +30,48 @@ use subtle::CtOption;
 /// of prime order `r`, and are equipped with a bilinear pairing function.
 pub trait Engine: ScalarEngine {
     /// The projective representation of an element in G1.
-    type G1: CurveProjective<Engine = Self, Base = Self::Fq, Scalar = Self::Fr, Affine = Self::G1Affine>
+    type G1: CurveProjective<Base = Self::Fq, Scalar = Self::Fr, Affine = Self::G1Affine>
         + From<Self::G1Affine>
-        + CurveOps<Self::G1Affine>
-        + CurveOpsOwned<Self::G1Affine>;
+        + GroupOps<Self::G1Affine>
+        + GroupOpsOwned<Self::G1Affine>
+        + ScalarMul<Self::Fr>
+        + ScalarMulOwned<Self::Fr>;
 
     /// The affine representation of an element in G1.
     type G1Affine: PairingCurveAffine<
-            Engine = Self,
             Base = Self::Fq,
             Scalar = Self::Fr,
             Projective = Self::G1,
             Pair = Self::G2Affine,
             PairingResult = Self::Fqk,
-        > + From<Self::G1>;
+        > + From<Self::G1>
+        + Mul<Self::Fr, Output = Self::G1>
+        + for<'a> Mul<&'a Self::Fr, Output = Self::G1>;
 
     /// The projective representation of an element in G2.
-    type G2: CurveProjective<Engine = Self, Base = Self::Fqe, Scalar = Self::Fr, Affine = Self::G2Affine>
+    type G2: CurveProjective<Base = Self::Fqe, Scalar = Self::Fr, Affine = Self::G2Affine>
         + From<Self::G2Affine>
-        + CurveOps<Self::G2Affine>
-        + CurveOpsOwned<Self::G2Affine>;
+        + GroupOps<Self::G2Affine>
+        + GroupOpsOwned<Self::G2Affine>
+        + ScalarMul<Self::Fr>
+        + ScalarMulOwned<Self::Fr>;
 
     /// The affine representation of an element in G2.
     type G2Affine: PairingCurveAffine<
-            Engine = Self,
             Base = Self::Fqe,
             Scalar = Self::Fr,
             Projective = Self::G2,
             Pair = Self::G1Affine,
             PairingResult = Self::Fqk,
-        > + From<Self::G2>;
+        > + From<Self::G2>
+        + Mul<Self::Fr, Output = Self::G2>
+        + for<'a> Mul<&'a Self::Fr, Output = Self::G2>;
 
     /// The base field that hosts G1.
-    type Fq: PrimeField + SqrtField;
+    type Fq: PrimeField;
 
     /// The extension field that hosts G2.
-    type Fqe: SqrtField;
+    type Fqe: Field;
 
     /// The extension field that hosts the target group of the pairing.
     type Fqk: Field;

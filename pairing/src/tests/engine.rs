@@ -1,9 +1,10 @@
-use group::{CurveAffine, CurveProjective};
+use ff::{Endianness, Field, PrimeField};
+use group::{CurveAffine, CurveProjective, Group};
 use rand_core::SeedableRng;
 use rand_xorshift::XorShiftRng;
 use std::ops::MulAssign;
 
-use crate::{Engine, Field, PairingCurveAffine, PrimeField};
+use crate::{Engine, PairingCurveAffine};
 
 pub fn engine_tests<E: Engine>() {
     let mut rng = XorShiftRng::from_seed([
@@ -12,21 +13,21 @@ pub fn engine_tests<E: Engine>() {
     ]);
 
     for _ in 0..10 {
-        let a = E::G1::random(&mut rng).into_affine();
-        let b = E::G2::random(&mut rng).into_affine();
+        let a = E::G1::random(&mut rng).to_affine();
+        let b = E::G2::random(&mut rng).to_affine();
 
         assert!(a.pairing_with(&b) == b.pairing_with(&a));
         assert!(a.pairing_with(&b) == E::pairing(a, b));
     }
 
     for _ in 0..1000 {
-        let z1 = E::G1Affine::zero().prepare();
-        let z2 = E::G2Affine::zero().prepare();
+        let z1 = E::G1Affine::identity().prepare();
+        let z2 = E::G2Affine::identity().prepare();
 
-        let a = E::G1::random(&mut rng).into_affine().prepare();
-        let b = E::G2::random(&mut rng).into_affine().prepare();
-        let c = E::G1::random(&mut rng).into_affine().prepare();
-        let d = E::G2::random(&mut rng).into_affine().prepare();
+        let a = E::G1::random(&mut rng).to_affine().prepare();
+        let b = E::G2::random(&mut rng).to_affine().prepare();
+        let c = E::G1::random(&mut rng).to_affine().prepare();
+        let d = E::G2::random(&mut rng).to_affine().prepare();
 
         assert_eq!(
             E::Fqk::one(),
@@ -66,8 +67,8 @@ fn random_miller_loop_tests<E: Engine>() {
 
         let p2 = E::pairing(a, b);
 
-        let a = a.into_affine().prepare();
-        let b = b.into_affine().prepare();
+        let a = a.to_affine().prepare();
+        let b = b.to_affine().prepare();
 
         let p1 = E::final_exponentiation(&E::miller_loop(&[(&a, &b)])).unwrap();
 
@@ -87,10 +88,10 @@ fn random_miller_loop_tests<E: Engine>() {
         let mut abcd = ab;
         abcd.mul_assign(&cd);
 
-        let a = a.into_affine().prepare();
-        let b = b.into_affine().prepare();
-        let c = c.into_affine().prepare();
-        let d = d.into_affine().prepare();
+        let a = a.to_affine().prepare();
+        let b = b.to_affine().prepare();
+        let c = c.to_affine().prepare();
+        let d = d.to_affine().prepare();
 
         let abcd_with_double_loop =
             E::final_exponentiation(&E::miller_loop(&[(&a, &b), (&c, &d)])).unwrap();
@@ -113,24 +114,28 @@ fn random_bilinearity_tests<E: Engine>() {
         let d = E::Fr::random(&mut rng);
 
         let mut ac = a;
-        ac.mul_assign(c);
+        MulAssign::<&E::Fr>::mul_assign(&mut ac, &c);
 
         let mut ad = a;
-        ad.mul_assign(d);
+        MulAssign::<&E::Fr>::mul_assign(&mut ad, &d);
 
         let mut bc = b;
-        bc.mul_assign(c);
+        MulAssign::<&E::Fr>::mul_assign(&mut bc, &c);
 
         let mut bd = b;
-        bd.mul_assign(d);
+        MulAssign::<&E::Fr>::mul_assign(&mut bd, &d);
 
         let acbd = E::pairing(ac, bd);
         let adbc = E::pairing(ad, bc);
 
-        let mut cd = c;
-        cd.mul_assign(&d);
+        let mut cd = (c * &d).to_repr();
+        <E::Fr as PrimeField>::ReprEndianness::toggle_little_endian(&mut cd);
 
-        let abcd = E::pairing(a, b).pow_vartime(cd.into_repr());
+        use byteorder::ByteOrder;
+        let mut cd_limbs = [0; 4];
+        byteorder::LittleEndian::read_u64_into(cd.as_ref(), &mut cd_limbs);
+
+        let abcd = E::pairing(a, b).pow_vartime(cd_limbs);
 
         assert_eq!(acbd, adbc);
         assert_eq!(acbd, abcd);

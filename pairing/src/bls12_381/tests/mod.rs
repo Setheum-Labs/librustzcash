@@ -1,5 +1,5 @@
-use ff::PrimeFieldRepr;
-use group::{CurveAffine, CurveProjective, EncodedPoint, GroupDecodingError};
+use ff::PrimeField;
+use group::{CurveAffine, CurveProjective, Group};
 
 use super::*;
 use crate::*;
@@ -23,7 +23,7 @@ fn test_pairing_result_against_relic() {
     0F41E58663BF08CF 068672CBD01A7EC7 3BACA4D72CA93544 DEFF686BFD6DF543 D48EAA24AFE47E1E FDE449383B676631
     */
 
-    assert_eq!(Bls12::pairing(G1::one(), G2::one()), Fq12 {
+    assert_eq!(Bls12::pairing(G1::generator(), G2::generator()), Fq12 {
         c0: Fq6 {
             c0: Fq2 {
                 c0: Fq::from_str("2819105605953691245277803056322684086884703000473961065716485506033588504203831029066448642358042597501014294104502").unwrap(),
@@ -55,24 +55,54 @@ fn test_pairing_result_against_relic() {
     });
 }
 
-fn test_vectors<G: CurveProjective, E: EncodedPoint<Affine = G::Affine>>(expected: &[u8]) {
-    let mut e = G::zero();
+fn uncompressed_test_vectors<G: CurveProjective>(expected: &[u8]) {
+    let mut e = G::identity();
+    let encoded_len = <G::Affine as CurveAffine>::Uncompressed::default()
+        .as_ref()
+        .len();
 
     let mut v = vec![];
     {
         let mut expected = expected;
         for _ in 0..1000 {
-            let e_affine = e.into_affine();
-            let encoded = E::from_affine(e_affine);
+            let e_affine = e.to_affine();
+            let encoded = e_affine.to_uncompressed();
             v.extend_from_slice(encoded.as_ref());
 
-            let mut decoded = E::empty();
-            decoded.as_mut().copy_from_slice(&expected[0..E::size()]);
-            expected = &expected[E::size()..];
-            let decoded = decoded.into_affine().unwrap();
+            let mut decoded = <G::Affine as CurveAffine>::Uncompressed::default();
+            decoded.as_mut().copy_from_slice(&expected[0..encoded_len]);
+            expected = &expected[encoded_len..];
+            let decoded = G::Affine::from_uncompressed(&decoded).unwrap();
             assert_eq!(e_affine, decoded);
 
-            e.add_assign(&G::one());
+            e.add_assign(&G::generator());
+        }
+    }
+
+    assert_eq!(&v[..], expected);
+}
+
+fn compressed_test_vectors<G: CurveProjective>(expected: &[u8]) {
+    let mut e = G::identity();
+    let encoded_len = <G::Affine as CurveAffine>::Compressed::default()
+        .as_ref()
+        .len();
+
+    let mut v = vec![];
+    {
+        let mut expected = expected;
+        for _ in 0..1000 {
+            let e_affine = e.to_affine();
+            let encoded = e_affine.to_compressed();
+            v.extend_from_slice(encoded.as_ref());
+
+            let mut decoded = <G::Affine as CurveAffine>::Compressed::default();
+            decoded.as_mut().copy_from_slice(&expected[0..encoded_len]);
+            expected = &expected[encoded_len..];
+            let decoded = G::Affine::from_compressed(&decoded).unwrap();
+            assert_eq!(e_affine, decoded);
+
+            e.add_assign(&G::generator());
         }
     }
 
@@ -81,33 +111,33 @@ fn test_vectors<G: CurveProjective, E: EncodedPoint<Affine = G::Affine>>(expecte
 
 #[test]
 fn test_g1_uncompressed_valid_vectors() {
-    test_vectors::<G1, G1Uncompressed>(include_bytes!("g1_uncompressed_valid_test_vectors.dat"));
+    uncompressed_test_vectors::<G1>(include_bytes!("g1_uncompressed_valid_test_vectors.dat"));
 }
 
 #[test]
 fn test_g1_compressed_valid_vectors() {
-    test_vectors::<G1, G1Compressed>(include_bytes!("g1_compressed_valid_test_vectors.dat"));
+    compressed_test_vectors::<G1>(include_bytes!("g1_compressed_valid_test_vectors.dat"));
 }
 
 #[test]
 fn test_g2_uncompressed_valid_vectors() {
-    test_vectors::<G2, G2Uncompressed>(include_bytes!("g2_uncompressed_valid_test_vectors.dat"));
+    uncompressed_test_vectors::<G2>(include_bytes!("g2_uncompressed_valid_test_vectors.dat"));
 }
 
 #[test]
 fn test_g2_compressed_valid_vectors() {
-    test_vectors::<G2, G2Compressed>(include_bytes!("g2_compressed_valid_test_vectors.dat"));
+    compressed_test_vectors::<G2>(include_bytes!("g2_compressed_valid_test_vectors.dat"));
 }
 
 #[test]
 fn test_g1_uncompressed_invalid_vectors() {
     {
-        let z = G1Affine::zero().into_uncompressed();
+        let z = G1Affine::identity().to_uncompressed();
 
         {
             let mut z = z;
             z.as_mut()[0] |= 0b1000_0000;
-            if let Err(GroupDecodingError::UnexpectedCompressionMode) = z.into_affine() {
+            if G1Affine::from_uncompressed(&z).is_none().into() {
                 // :)
             } else {
                 panic!("should have rejected the point because we expected an uncompressed point");
@@ -117,7 +147,7 @@ fn test_g1_uncompressed_invalid_vectors() {
         {
             let mut z = z;
             z.as_mut()[0] |= 0b0010_0000;
-            if let Err(GroupDecodingError::UnexpectedInformation) = z.into_affine() {
+            if G1Affine::from_uncompressed(&z).is_none().into() {
                 // :)
             } else {
                 panic!("should have rejected the point because the parity bit should not be set if the point is at infinity");
@@ -127,7 +157,7 @@ fn test_g1_uncompressed_invalid_vectors() {
         for i in 0..G1Uncompressed::size() {
             let mut z = z;
             z.as_mut()[i] |= 0b0000_0001;
-            if let Err(GroupDecodingError::UnexpectedInformation) = z.into_affine() {
+            if G1Affine::from_uncompressed(&z).is_none().into() {
                 // :)
             } else {
                 panic!("should have rejected the point because the coordinates should be zeroes at the point at infinity");
@@ -135,12 +165,12 @@ fn test_g1_uncompressed_invalid_vectors() {
         }
     }
 
-    let o = G1Affine::one().into_uncompressed();
+    let o = G1Affine::generator().to_uncompressed();
 
     {
         let mut o = o;
         o.as_mut()[0] |= 0b1000_0000;
-        if let Err(GroupDecodingError::UnexpectedCompressionMode) = o.into_affine() {
+        if G1Affine::from_uncompressed(&o).is_none().into() {
             // :)
         } else {
             panic!("should have rejected the point because we expected an uncompressed point");
@@ -151,10 +181,10 @@ fn test_g1_uncompressed_invalid_vectors() {
 
     {
         let mut o = o;
-        m.write_be(&mut o.as_mut()[0..]).unwrap();
+        o.as_mut()[..48].copy_from_slice(m.as_ref());
 
-        if let Err(GroupDecodingError::CoordinateDecodingError(coordinate, _)) = o.into_affine() {
-            assert_eq!(coordinate, "x coordinate");
+        if G1Affine::from_uncompressed(&o).is_none().into() {
+            // x coordinate
         } else {
             panic!("should have rejected the point")
         }
@@ -162,22 +192,22 @@ fn test_g1_uncompressed_invalid_vectors() {
 
     {
         let mut o = o;
-        m.write_be(&mut o.as_mut()[48..]).unwrap();
+        o.as_mut()[48..].copy_from_slice(m.as_ref());
 
-        if let Err(GroupDecodingError::CoordinateDecodingError(coordinate, _)) = o.into_affine() {
-            assert_eq!(coordinate, "y coordinate");
+        if G1Affine::from_uncompressed(&o).is_none().into() {
+            // y coordinate
         } else {
             panic!("should have rejected the point")
         }
     }
 
     {
-        let m = Fq::zero().into_repr();
+        let m = Fq::zero().to_repr();
 
         let mut o = o;
-        m.write_be(&mut o.as_mut()[0..]).unwrap();
+        o.as_mut()[..48].copy_from_slice(m.as_ref());
 
-        if let Err(GroupDecodingError::NotOnCurve) = o.into_affine() {
+        if G1Affine::from_uncompressed(&o).is_none().into() {
             // :)
         } else {
             panic!("should have rejected the point because it isn't on the curve")
@@ -191,17 +221,17 @@ fn test_g1_uncompressed_invalid_vectors() {
         loop {
             let mut x3b = x.square();
             x3b.mul_assign(&x);
-            x3b.add_assign(&Fq::from_repr(FqRepr::from(4)).unwrap()); // TODO: perhaps expose coeff_b through API?
+            x3b.add_assign(&Fq::from(4)); // TODO: perhaps expose coeff_b through API?
 
             let y = x3b.sqrt();
             if y.is_some().into() {
                 let y = y.unwrap();
 
                 // We know this is on the curve, but it's likely not going to be in the correct subgroup.
-                x.into_repr().write_be(&mut o.as_mut()[0..]).unwrap();
-                y.into_repr().write_be(&mut o.as_mut()[48..]).unwrap();
+                o.as_mut()[..48].copy_from_slice(x.to_repr().as_ref());
+                o.as_mut()[48..].copy_from_slice(y.to_repr().as_ref());
 
-                if let Err(GroupDecodingError::NotInSubgroup) = o.into_affine() {
+                if G1Affine::from_uncompressed(&o).is_none().into() {
                     break;
                 } else {
                     panic!(
@@ -218,12 +248,12 @@ fn test_g1_uncompressed_invalid_vectors() {
 #[test]
 fn test_g2_uncompressed_invalid_vectors() {
     {
-        let z = G2Affine::zero().into_uncompressed();
+        let z = G2Affine::identity().to_uncompressed();
 
         {
             let mut z = z;
             z.as_mut()[0] |= 0b1000_0000;
-            if let Err(GroupDecodingError::UnexpectedCompressionMode) = z.into_affine() {
+            if G2Affine::from_uncompressed(&z).is_none().into() {
                 // :)
             } else {
                 panic!("should have rejected the point because we expected an uncompressed point");
@@ -233,7 +263,7 @@ fn test_g2_uncompressed_invalid_vectors() {
         {
             let mut z = z;
             z.as_mut()[0] |= 0b0010_0000;
-            if let Err(GroupDecodingError::UnexpectedInformation) = z.into_affine() {
+            if G2Affine::from_uncompressed(&z).is_none().into() {
                 // :)
             } else {
                 panic!("should have rejected the point because the parity bit should not be set if the point is at infinity");
@@ -243,7 +273,7 @@ fn test_g2_uncompressed_invalid_vectors() {
         for i in 0..G2Uncompressed::size() {
             let mut z = z;
             z.as_mut()[i] |= 0b0000_0001;
-            if let Err(GroupDecodingError::UnexpectedInformation) = z.into_affine() {
+            if G2Affine::from_uncompressed(&z).is_none().into() {
                 // :)
             } else {
                 panic!("should have rejected the point because the coordinates should be zeroes at the point at infinity");
@@ -251,12 +281,12 @@ fn test_g2_uncompressed_invalid_vectors() {
         }
     }
 
-    let o = G2Affine::one().into_uncompressed();
+    let o = G2Affine::generator().to_uncompressed();
 
     {
         let mut o = o;
         o.as_mut()[0] |= 0b1000_0000;
-        if let Err(GroupDecodingError::UnexpectedCompressionMode) = o.into_affine() {
+        if G2Affine::from_uncompressed(&o).is_none().into() {
             // :)
         } else {
             panic!("should have rejected the point because we expected an uncompressed point");
@@ -267,10 +297,10 @@ fn test_g2_uncompressed_invalid_vectors() {
 
     {
         let mut o = o;
-        m.write_be(&mut o.as_mut()[0..]).unwrap();
+        o.as_mut()[..48].copy_from_slice(m.as_ref());
 
-        if let Err(GroupDecodingError::CoordinateDecodingError(coordinate, _)) = o.into_affine() {
-            assert_eq!(coordinate, "x coordinate (c1)");
+        if G2Affine::from_uncompressed(&o).is_none().into() {
+            // x coordinate (c1)
         } else {
             panic!("should have rejected the point")
         }
@@ -278,10 +308,10 @@ fn test_g2_uncompressed_invalid_vectors() {
 
     {
         let mut o = o;
-        m.write_be(&mut o.as_mut()[48..]).unwrap();
+        o.as_mut()[48..96].copy_from_slice(m.as_ref());
 
-        if let Err(GroupDecodingError::CoordinateDecodingError(coordinate, _)) = o.into_affine() {
-            assert_eq!(coordinate, "x coordinate (c0)");
+        if G2Affine::from_uncompressed(&o).is_none().into() {
+            // x coordinate (c0)
         } else {
             panic!("should have rejected the point")
         }
@@ -289,10 +319,10 @@ fn test_g2_uncompressed_invalid_vectors() {
 
     {
         let mut o = o;
-        m.write_be(&mut o.as_mut()[96..]).unwrap();
+        o.as_mut()[96..144].copy_from_slice(m.as_ref());
 
-        if let Err(GroupDecodingError::CoordinateDecodingError(coordinate, _)) = o.into_affine() {
-            assert_eq!(coordinate, "y coordinate (c1)");
+        if G2Affine::from_uncompressed(&o).is_none().into() {
+            // y coordinate (c1)
         } else {
             panic!("should have rejected the point")
         }
@@ -300,23 +330,23 @@ fn test_g2_uncompressed_invalid_vectors() {
 
     {
         let mut o = o;
-        m.write_be(&mut o.as_mut()[144..]).unwrap();
+        o.as_mut()[144..].copy_from_slice(m.as_ref());
 
-        if let Err(GroupDecodingError::CoordinateDecodingError(coordinate, _)) = o.into_affine() {
-            assert_eq!(coordinate, "y coordinate (c0)");
+        if G2Affine::from_uncompressed(&o).is_none().into() {
+            // y coordinate (c0)
         } else {
             panic!("should have rejected the point")
         }
     }
 
     {
-        let m = Fq::zero().into_repr();
+        let m = Fq::zero().to_repr();
 
         let mut o = o;
-        m.write_be(&mut o.as_mut()[0..]).unwrap();
-        m.write_be(&mut o.as_mut()[48..]).unwrap();
+        o.as_mut()[..48].copy_from_slice(m.as_ref());
+        o.as_mut()[48..96].copy_from_slice(m.as_ref());
 
-        if let Err(GroupDecodingError::NotOnCurve) = o.into_affine() {
+        if G2Affine::from_uncompressed(&o).is_none().into() {
             // :)
         } else {
             panic!("should have rejected the point because it isn't on the curve")
@@ -331,8 +361,8 @@ fn test_g2_uncompressed_invalid_vectors() {
             let mut x3b = x.square();
             x3b.mul_assign(&x);
             x3b.add_assign(&Fq2 {
-                c0: Fq::from_repr(FqRepr::from(4)).unwrap(),
-                c1: Fq::from_repr(FqRepr::from(4)).unwrap(),
+                c0: Fq::from(4),
+                c1: Fq::from(4),
             }); // TODO: perhaps expose coeff_b through API?
 
             let y = x3b.sqrt();
@@ -340,12 +370,12 @@ fn test_g2_uncompressed_invalid_vectors() {
                 let y = y.unwrap();
 
                 // We know this is on the curve, but it's likely not going to be in the correct subgroup.
-                x.c1.into_repr().write_be(&mut o.as_mut()[0..]).unwrap();
-                x.c0.into_repr().write_be(&mut o.as_mut()[48..]).unwrap();
-                y.c1.into_repr().write_be(&mut o.as_mut()[96..]).unwrap();
-                y.c0.into_repr().write_be(&mut o.as_mut()[144..]).unwrap();
+                o.as_mut()[..48].copy_from_slice(x.c1.to_repr().as_ref());
+                o.as_mut()[48..96].copy_from_slice(x.c0.to_repr().as_ref());
+                o.as_mut()[96..144].copy_from_slice(y.c1.to_repr().as_ref());
+                o.as_mut()[144..].copy_from_slice(y.c0.to_repr().as_ref());
 
-                if let Err(GroupDecodingError::NotInSubgroup) = o.into_affine() {
+                if G2Affine::from_uncompressed(&o).is_none().into() {
                     break;
                 } else {
                     panic!(
@@ -362,12 +392,12 @@ fn test_g2_uncompressed_invalid_vectors() {
 #[test]
 fn test_g1_compressed_invalid_vectors() {
     {
-        let z = G1Affine::zero().into_compressed();
+        let z = G1Affine::identity().to_compressed();
 
         {
             let mut z = z;
             z.as_mut()[0] &= 0b0111_1111;
-            if let Err(GroupDecodingError::UnexpectedCompressionMode) = z.into_affine() {
+            if G1Affine::from_compressed(&z).is_none().into() {
                 // :)
             } else {
                 panic!("should have rejected the point because we expected a compressed point");
@@ -377,7 +407,7 @@ fn test_g1_compressed_invalid_vectors() {
         {
             let mut z = z;
             z.as_mut()[0] |= 0b0010_0000;
-            if let Err(GroupDecodingError::UnexpectedInformation) = z.into_affine() {
+            if G1Affine::from_compressed(&z).is_none().into() {
                 // :)
             } else {
                 panic!("should have rejected the point because the parity bit should not be set if the point is at infinity");
@@ -387,7 +417,7 @@ fn test_g1_compressed_invalid_vectors() {
         for i in 0..G1Compressed::size() {
             let mut z = z;
             z.as_mut()[i] |= 0b0000_0001;
-            if let Err(GroupDecodingError::UnexpectedInformation) = z.into_affine() {
+            if G1Affine::from_compressed(&z).is_none().into() {
                 // :)
             } else {
                 panic!("should have rejected the point because the coordinates should be zeroes at the point at infinity");
@@ -395,12 +425,12 @@ fn test_g1_compressed_invalid_vectors() {
         }
     }
 
-    let o = G1Affine::one().into_compressed();
+    let o = G1Affine::generator().to_compressed();
 
     {
         let mut o = o;
         o.as_mut()[0] &= 0b0111_1111;
-        if let Err(GroupDecodingError::UnexpectedCompressionMode) = o.into_affine() {
+        if G1Affine::from_compressed(&o).is_none().into() {
             // :)
         } else {
             panic!("should have rejected the point because we expected a compressed point");
@@ -411,11 +441,11 @@ fn test_g1_compressed_invalid_vectors() {
 
     {
         let mut o = o;
-        m.write_be(&mut o.as_mut()[0..]).unwrap();
+        o.as_mut()[..48].copy_from_slice(m.as_ref());
         o.as_mut()[0] |= 0b1000_0000;
 
-        if let Err(GroupDecodingError::CoordinateDecodingError(coordinate, _)) = o.into_affine() {
-            assert_eq!(coordinate, "x coordinate");
+        if G1Affine::from_compressed(&o).is_none().into() {
+            // x coordinate
         } else {
             panic!("should have rejected the point")
         }
@@ -428,15 +458,15 @@ fn test_g1_compressed_invalid_vectors() {
         loop {
             let mut x3b = x.square();
             x3b.mul_assign(&x);
-            x3b.add_assign(&Fq::from_repr(FqRepr::from(4)).unwrap()); // TODO: perhaps expose coeff_b through API?
+            x3b.add_assign(&Fq::from(4)); // TODO: perhaps expose coeff_b through API?
 
             if x3b.sqrt().is_some().into() {
                 x.add_assign(&Fq::one());
             } else {
-                x.into_repr().write_be(&mut o.as_mut()[0..]).unwrap();
+                o.as_mut().copy_from_slice(x.to_repr().as_ref());
                 o.as_mut()[0] |= 0b1000_0000;
 
-                if let Err(GroupDecodingError::NotOnCurve) = o.into_affine() {
+                if G1Affine::from_compressed(&o).is_none().into() {
                     break;
                 } else {
                     panic!("should have rejected the point because it isn't on the curve")
@@ -452,14 +482,14 @@ fn test_g1_compressed_invalid_vectors() {
         loop {
             let mut x3b = x.square();
             x3b.mul_assign(&x);
-            x3b.add_assign(&Fq::from_repr(FqRepr::from(4)).unwrap()); // TODO: perhaps expose coeff_b through API?
+            x3b.add_assign(&Fq::from(4)); // TODO: perhaps expose coeff_b through API?
 
             if x3b.sqrt().is_some().into() {
                 // We know this is on the curve, but it's likely not going to be in the correct subgroup.
-                x.into_repr().write_be(&mut o.as_mut()[0..]).unwrap();
+                o.as_mut().copy_from_slice(x.to_repr().as_ref());
                 o.as_mut()[0] |= 0b1000_0000;
 
-                if let Err(GroupDecodingError::NotInSubgroup) = o.into_affine() {
+                if G1Affine::from_compressed(&o).is_none().into() {
                     break;
                 } else {
                     panic!(
@@ -476,12 +506,12 @@ fn test_g1_compressed_invalid_vectors() {
 #[test]
 fn test_g2_compressed_invalid_vectors() {
     {
-        let z = G2Affine::zero().into_compressed();
+        let z = G2Affine::identity().to_compressed();
 
         {
             let mut z = z;
             z.as_mut()[0] &= 0b0111_1111;
-            if let Err(GroupDecodingError::UnexpectedCompressionMode) = z.into_affine() {
+            if G2Affine::from_compressed(&z).is_none().into() {
                 // :)
             } else {
                 panic!("should have rejected the point because we expected a compressed point");
@@ -491,7 +521,7 @@ fn test_g2_compressed_invalid_vectors() {
         {
             let mut z = z;
             z.as_mut()[0] |= 0b0010_0000;
-            if let Err(GroupDecodingError::UnexpectedInformation) = z.into_affine() {
+            if G2Affine::from_compressed(&z).is_none().into() {
                 // :)
             } else {
                 panic!("should have rejected the point because the parity bit should not be set if the point is at infinity");
@@ -501,7 +531,7 @@ fn test_g2_compressed_invalid_vectors() {
         for i in 0..G2Compressed::size() {
             let mut z = z;
             z.as_mut()[i] |= 0b0000_0001;
-            if let Err(GroupDecodingError::UnexpectedInformation) = z.into_affine() {
+            if G2Affine::from_compressed(&z).is_none().into() {
                 // :)
             } else {
                 panic!("should have rejected the point because the coordinates should be zeroes at the point at infinity");
@@ -509,12 +539,12 @@ fn test_g2_compressed_invalid_vectors() {
         }
     }
 
-    let o = G2Affine::one().into_compressed();
+    let o = G2Affine::generator().to_compressed();
 
     {
         let mut o = o;
         o.as_mut()[0] &= 0b0111_1111;
-        if let Err(GroupDecodingError::UnexpectedCompressionMode) = o.into_affine() {
+        if G2Affine::from_compressed(&o).is_none().into() {
             // :)
         } else {
             panic!("should have rejected the point because we expected a compressed point");
@@ -525,11 +555,11 @@ fn test_g2_compressed_invalid_vectors() {
 
     {
         let mut o = o;
-        m.write_be(&mut o.as_mut()[0..]).unwrap();
+        o.as_mut()[..48].copy_from_slice(m.as_ref());
         o.as_mut()[0] |= 0b1000_0000;
 
-        if let Err(GroupDecodingError::CoordinateDecodingError(coordinate, _)) = o.into_affine() {
-            assert_eq!(coordinate, "x coordinate (c1)");
+        if G2Affine::from_compressed(&o).is_none().into() {
+            // x coordinate (c1)
         } else {
             panic!("should have rejected the point")
         }
@@ -537,11 +567,11 @@ fn test_g2_compressed_invalid_vectors() {
 
     {
         let mut o = o;
-        m.write_be(&mut o.as_mut()[48..]).unwrap();
+        o.as_mut()[48..96].copy_from_slice(m.as_ref());
         o.as_mut()[0] |= 0b1000_0000;
 
-        if let Err(GroupDecodingError::CoordinateDecodingError(coordinate, _)) = o.into_affine() {
-            assert_eq!(coordinate, "x coordinate (c0)");
+        if G2Affine::from_compressed(&o).is_none().into() {
+            // x coordinate (c0)
         } else {
             panic!("should have rejected the point")
         }
@@ -558,18 +588,18 @@ fn test_g2_compressed_invalid_vectors() {
             let mut x3b = x.square();
             x3b.mul_assign(&x);
             x3b.add_assign(&Fq2 {
-                c0: Fq::from_repr(FqRepr::from(4)).unwrap(),
-                c1: Fq::from_repr(FqRepr::from(4)).unwrap(),
+                c0: Fq::from(4),
+                c1: Fq::from(4),
             }); // TODO: perhaps expose coeff_b through API?
 
             if x3b.sqrt().is_some().into() {
                 x.add_assign(&Fq2::one());
             } else {
-                x.c1.into_repr().write_be(&mut o.as_mut()[0..]).unwrap();
-                x.c0.into_repr().write_be(&mut o.as_mut()[48..]).unwrap();
+                o.as_mut()[..48].copy_from_slice(x.c1.to_repr().as_ref());
+                o.as_mut()[48..].copy_from_slice(x.c0.to_repr().as_ref());
                 o.as_mut()[0] |= 0b1000_0000;
 
-                if let Err(GroupDecodingError::NotOnCurve) = o.into_affine() {
+                if G2Affine::from_compressed(&o).is_none().into() {
                     break;
                 } else {
                     panic!("should have rejected the point because it isn't on the curve")
@@ -589,17 +619,17 @@ fn test_g2_compressed_invalid_vectors() {
             let mut x3b = x.square();
             x3b.mul_assign(&x);
             x3b.add_assign(&Fq2 {
-                c0: Fq::from_repr(FqRepr::from(4)).unwrap(),
-                c1: Fq::from_repr(FqRepr::from(4)).unwrap(),
+                c0: Fq::from(4),
+                c1: Fq::from(4),
             }); // TODO: perhaps expose coeff_b through API?
 
             if x3b.sqrt().is_some().into() {
                 // We know this is on the curve, but it's likely not going to be in the correct subgroup.
-                x.c1.into_repr().write_be(&mut o.as_mut()[0..]).unwrap();
-                x.c0.into_repr().write_be(&mut o.as_mut()[48..]).unwrap();
+                o.as_mut()[..48].copy_from_slice(x.c1.to_repr().as_ref());
+                o.as_mut()[48..].copy_from_slice(x.c0.to_repr().as_ref());
                 o.as_mut()[0] |= 0b1000_0000;
 
-                if let Err(GroupDecodingError::NotInSubgroup) = o.into_affine() {
+                if G2Affine::from_compressed(&o).is_none().into() {
                     break;
                 } else {
                     panic!(

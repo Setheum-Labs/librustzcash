@@ -1,6 +1,6 @@
 //! Helpers for testing circuit implementations.
 
-use ff::{Field, PrimeField, PrimeFieldRepr, ScalarEngine};
+use ff::{Endianness, Field, PrimeField, ScalarEngine};
 
 use crate::{ConstraintSystem, Index, LinearCombination, SynthesisError, Variable};
 
@@ -106,7 +106,10 @@ fn hash_lc<E: ScalarEngine>(terms: &[(Variable, E::Fr)], h: &mut Blake2sState) {
             }
         }
 
-        coeff.into_repr().write_be(&mut buf[9..]).unwrap();
+        let mut coeff_repr = coeff.to_repr();
+        <E::Fr as PrimeField>::ReprEndianness::toggle_little_endian(&mut coeff_repr);
+        let coeff_be: Vec<_> = coeff_repr.as_ref().iter().cloned().rev().collect();
+        buf[9..].copy_from_slice(&coeff_be[..]);
 
         h.update(&buf);
     }

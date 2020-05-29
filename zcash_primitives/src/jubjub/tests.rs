@@ -1,6 +1,6 @@
 use super::{edwards, montgomery, JubjubEngine, JubjubParams, PrimeOrder};
 
-use ff::{Field, PrimeField, PrimeFieldRepr, SqrtField};
+use ff::{Endianness, Field, PrimeField};
 use std::ops::{AddAssign, MulAssign, Neg, SubAssign};
 
 use rand_core::{RngCore, SeedableRng};
@@ -237,7 +237,7 @@ fn test_get_for<E: JubjubEngine>(params: &E::Params) {
         let p = edwards::Point::<E, _>::get_for_y(y, sign, params);
         if bool::from(p.is_some()) {
             let mut p = p.unwrap();
-            assert!(p.to_xy().0.into_repr().is_odd() == sign);
+            assert!(p.to_xy().0.is_odd() == sign);
             p = p.negate();
             assert!(edwards::Point::<E, _>::get_for_y(y, !sign, params).unwrap() == p);
         }
@@ -370,32 +370,55 @@ fn test_jubjub_params<E: JubjubEngine>(params: &E::Params) {
         // Check that the number of windows per generator
         // in the Pedersen hash does not allow for collisions
 
-        let mut cur = E::Fs::one().into_repr();
+        let mut cur = E::Fs::one();
 
-        let mut max = E::Fs::char();
-        {
-            max.sub_noborrow(&E::Fs::one().into_repr());
-            max.div2();
-        }
+        let max = {
+            // Grab char - 1 in little endian.
+            let mut tmp = (-E::Fs::one()).to_repr();
+            <E::Fs as PrimeField>::ReprEndianness::toggle_little_endian(&mut tmp);
 
-        let mut pacc = E::Fs::zero().into_repr();
-        let mut nacc = E::Fs::char();
+            // Shift right by 1 bit.
+            let mut borrow = 0;
+            for b in tmp.as_mut().iter_mut().rev() {
+                let new_borrow = *b & 1;
+                *b = (borrow << 7) | (*b >> 1);
+                borrow = new_borrow;
+            }
+
+            // Turns out we want this in little endian!
+            tmp
+        };
+
+        let mut pacc = E::Fs::zero();
+        let mut nacc = E::Fs::zero();
 
         for _ in 0..params.pedersen_hash_chunks_per_generator() {
             // tmp = cur * 4
-            let mut tmp = cur;
-            tmp.mul2();
-            tmp.mul2();
+            let tmp = cur.double().double();
 
-            pacc.add_nocarry(&tmp);
-            nacc.sub_noborrow(&tmp);
+            pacc += &tmp;
+            nacc -= &tmp; // The first subtraction wraps intentionally.
 
-            assert!(pacc < max);
-            assert!(pacc < nacc);
+            let mut pacc_repr = pacc.to_repr();
+            let mut nacc_repr = nacc.to_repr();
+            <E::Fs as PrimeField>::ReprEndianness::toggle_little_endian(&mut pacc_repr);
+            <E::Fs as PrimeField>::ReprEndianness::toggle_little_endian(&mut nacc_repr);
+
+            fn less_than(val: &[u8], bound: &[u8]) -> bool {
+                for (a, b) in val.iter().rev().zip(bound.iter().rev()) {
+                    if a < b {
+                        return true;
+                    }
+                }
+
+                false
+            }
+            assert!(less_than(pacc_repr.as_ref(), max.as_ref()));
+            assert!(less_than(pacc_repr.as_ref(), nacc_repr.as_ref()));
 
             // cur = cur * 16
             for _ in 0..4 {
-                cur.mul2();
+                cur = cur.double();
             }
         }
     }

@@ -1,6 +1,6 @@
 use super::multicore::Worker;
 use bit_vec::{self, BitVec};
-use ff::{Field, PrimeField, PrimeFieldRepr, ScalarEngine};
+use ff::{Endianness, Field, PrimeField};
 use futures::Future;
 use group::{CurveAffine, CurveProjective};
 use std::io;
@@ -55,7 +55,7 @@ impl<G: CurveAffine> Source<G> for (Arc<Vec<G>>, usize) {
             .into());
         }
 
-        if self.0[self.1].is_zero() {
+        if self.0[self.1].is_identity().into() {
             return Err(SynthesisError::UnexpectedIdentity);
         }
 
@@ -154,7 +154,7 @@ fn multiexp_inner<Q, D, G, S>(
     pool: &Worker,
     bases: S,
     density_map: D,
-    exponents: Arc<Vec<<<G::Engine as ScalarEngine>::Fr as PrimeField>::Repr>>,
+    exponents: Arc<Vec<G::Scalar>>,
     mut skip: u32,
     c: u32,
     handle_trivial: bool,
@@ -173,21 +173,20 @@ where
 
         pool.compute(move || {
             // Accumulate the result
-            let mut acc = G::zero();
+            let mut acc = G::identity();
 
             // Build a source for the bases
             let mut bases = bases.new();
 
             // Create space for the buckets
-            let mut buckets = vec![G::zero(); (1 << c) - 1];
+            let mut buckets = vec![G::identity(); (1 << c) - 1];
 
-            let zero = <G::Engine as ScalarEngine>::Fr::zero().into_repr();
-            let one = <G::Engine as ScalarEngine>::Fr::one().into_repr();
+            let one = G::Scalar::one();
 
             // Sort the bases into buckets
             for (&exp, density) in exponents.iter().zip(density_map.as_ref().iter()) {
                 if density {
-                    if exp == zero {
+                    if exp.is_zero() {
                         bases.skip(1)?;
                     } else if exp == one {
                         if handle_trivial {
@@ -196,9 +195,18 @@ where
                             bases.skip(1)?;
                         }
                     } else {
-                        let mut exp = exp;
-                        exp.shr(skip);
-                        let exp = exp.as_ref()[0] % (1 << c);
+                        let mut exp = exp.to_repr();
+                        <G::Scalar as PrimeField>::ReprEndianness::toggle_little_endian(&mut exp);
+
+                        let exp = exp
+                            .as_ref()
+                            .into_iter()
+                            .map(|b| (0..8).map(move |i| (b >> i) & 1u8))
+                            .flatten()
+                            .skip(skip as usize)
+                            .take(c as usize)
+                            .enumerate()
+                            .fold(0u64, |acc, (i, b)| acc + ((b as u64) << i));
 
                         if exp != 0 {
                             (&mut buckets[(exp - 1) as usize])
@@ -214,7 +222,7 @@ where
             // e.g. 3a + 2b + 1c = a +
             //                    (a) + b +
             //                    ((a) + b) + c
-            let mut running_sum = G::zero();
+            let mut running_sum = G::identity();
             for exp in buckets.into_iter().rev() {
                 running_sum.add_assign(&exp);
                 acc.add_assign(&running_sum);
@@ -226,7 +234,7 @@ where
 
     skip += c;
 
-    if skip >= <G::Engine as ScalarEngine>::Fr::NUM_BITS {
+    if skip >= G::Scalar::NUM_BITS {
         // There isn't another region.
         Box::new(this)
     } else {
@@ -244,7 +252,7 @@ where
             ))
             .map(move |(this, mut higher): (_, G)| {
                 for _ in 0..c {
-                    higher.double();
+                    higher = higher.double();
                 }
 
                 higher.add_assign(&this);
@@ -261,7 +269,7 @@ pub fn multiexp<Q, D, G, S>(
     pool: &Worker,
     bases: S,
     density_map: D,
-    exponents: Arc<Vec<<<G::Engine as ScalarEngine>::Fr as PrimeField>::Repr>>,
+    exponents: Arc<Vec<G::Scalar>>,
 ) -> Box<dyn Future<Item = G, Error = SynthesisError>>
 where
     for<'a> &'a Q: QueryDensity,
@@ -285,24 +293,28 @@ where
     multiexp_inner(pool, bases, density_map, exponents, 0, c, true)
 }
 
+#[cfg(all(test, feature = "pairing"))]
+use ff::ScalarEngine;
+
 #[cfg(feature = "pairing")]
 #[test]
 fn test_with_bls12() {
     fn naive_multiexp<G: CurveProjective>(
         bases: Arc<Vec<<G as CurveProjective>::Affine>>,
-        exponents: Arc<Vec<<G::Scalar as PrimeField>::Repr>>,
+        exponents: Arc<Vec<G::Scalar>>,
     ) -> G {
         assert_eq!(bases.len(), exponents.len());
 
-        let mut acc = G::zero();
+        let mut acc = G::identity();
 
         for (base, exp) in bases.iter().zip(exponents.iter()) {
-            AddAssign::<&G>::add_assign(&mut acc, &base.mul(*exp));
+            AddAssign::<&G>::add_assign(&mut acc, &(*base * *exp));
         }
 
         acc
     }
 
+    use group::Group;
     use pairing::{bls12_381::Bls12, Engine};
     use rand;
 
@@ -311,12 +323,12 @@ fn test_with_bls12() {
     let rng = &mut rand::thread_rng();
     let v = Arc::new(
         (0..SAMPLES)
-            .map(|_| <Bls12 as ScalarEngine>::Fr::random(rng).into_repr())
+            .map(|_| <Bls12 as ScalarEngine>::Fr::random(rng))
             .collect::<Vec<_>>(),
     );
     let g = Arc::new(
         (0..SAMPLES)
-            .map(|_| <Bls12 as Engine>::G1::random(rng).into_affine())
+            .map(|_| <Bls12 as Engine>::G1::random(rng).to_affine())
             .collect::<Vec<_>>(),
     );
 
