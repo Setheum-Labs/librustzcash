@@ -817,10 +817,10 @@ impl<E: Engine> ExtendedParameters<E> {
         let g2_coeffs = g2_coeffs.into_coeffs();
 
         // Remove the Point() wrappers
-        let mut g1_coeffs = g1_coeffs.into_iter()
+        let g1_coeffs = g1_coeffs.into_iter()
             .map(|e| e.0)
             .collect::<Vec<_>>();
-        let mut g2_coeffs = g2_coeffs.into_iter()
+        let g2_coeffs = g2_coeffs.into_iter()
             .map(|e| e.0)
             .collect::<Vec<_>>();
 
