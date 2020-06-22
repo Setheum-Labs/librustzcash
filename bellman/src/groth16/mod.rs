@@ -1035,6 +1035,7 @@ mod test_with_bls12_381 {
     use pairing::bls12_381::{Bls12, Fr};
     use rand::thread_rng;
     use std::ops::MulAssign;
+    use std::marker::PhantomData;
 
     struct MySillyCircuit<E: Engine> {
         a: Option<E::Fr>,
@@ -1134,8 +1135,101 @@ mod test_with_bls12_381 {
 
     #[test]
     fn subversion_check() {
+
+        #[derive(Clone)]
+        pub struct Benchmark<E: Engine> {
+            num_constraints: usize,
+            _engine: PhantomData<E::Fr>,
+        }
+
+        impl<E: Engine> Benchmark<E> {
+            pub fn new(num_constraints: usize) -> Self {
+                Self {
+                    num_constraints,
+                    _engine: PhantomData,
+                }
+            }
+        }
+
+        impl<E: Engine> Circuit<E> for Benchmark<E> {
+            fn synthesize<CS: ConstraintSystem<E>>(
+                self,
+                cs: &mut CS,
+            ) -> Result<(), SynthesisError> {
+                let mut assignments = Vec::new();
+                let mut a_val = E::Fr::one();
+                let mut a_var = cs.alloc_input(|| "a", || Ok(a_val))?;
+                assignments.push((a_val, a_var));
+
+                let mut b_val = E::Fr::one();
+                let mut b_var = cs.alloc_input(|| "b", || Ok(b_val))?;
+                assignments.push((b_val, a_var));
+
+                for i in 0..self.num_constraints - 1 {
+                    if i % 2 != 0 {
+                        let mut c_val = a_val;
+                        c_val.mul_assign(&b_val);
+                        let c_var = cs.alloc(|| format!("{}", i), || Ok(c_val))?;
+
+                        cs.enforce(
+                            || format!("{}: a * b = c", i),
+                            |lc| lc + a_var,
+                            |lc| lc + b_var,
+                            |lc| lc + c_var,
+                        );
+
+                        assignments.push((c_val, c_var));
+                        a_val = b_val;
+                        a_var = b_var;
+                        b_val = c_val;
+                        b_var = c_var;
+                    } else {
+                        let mut c_val = a_val;
+                        c_val.add_assign(&b_val);
+                        let c_var = cs.alloc(|| format!("{}", i), || Ok(c_val))?;
+
+                        cs.enforce(
+                            || format!("{}: a + b = c", i),
+                            |lc| lc + a_var + b_var,
+                            |lc| lc + CS::one(),
+                            |lc| lc + c_var,
+                        );
+
+                        assignments.push((c_val, c_var));
+                        a_val = b_val;
+                        a_var = b_var;
+                        b_val = c_val;
+                        b_var = c_var;
+                    }
+                }
+
+                let mut a_lc = LinearCombination::zero();
+                let mut b_lc = LinearCombination::zero();
+                let mut c_val = E::Fr::zero();
+
+                for (val, var) in assignments {
+                    a_lc = a_lc + var;
+                    b_lc = b_lc + var;
+                    c_val.add_assign(&val);
+                }
+                c_val.square();
+
+                let c_var = cs.alloc(|| "c_val", || Ok(c_val))?;
+
+                cs.enforce(
+                    || "assignments.sum().square()",
+                    |_| a_lc,
+                    |_| b_lc,
+                    |lc| lc + c_var,
+                );
+
+                Ok(())
+            }
+        }
+
+        let c = Benchmark::new(1000);
         let rng = &mut thread_rng();
-        let params = generate_extended_random_parameters::<Bls12, _, _>(MySillyCircuit { a: None, b: None }, rng).unwrap();
-        assert!(params.verify(MySillyCircuit { a: None, b: None }, rng).is_ok());
+        let params = generate_extended_random_parameters::<Bls12, _, _>(c.clone(), rng).unwrap();
+        assert!(params.verify(c, rng).is_ok());
     }
 }
