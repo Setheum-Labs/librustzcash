@@ -677,6 +677,11 @@ impl<E: Engine> ExtendedParameters<E> {
             return Err(SynthesisError::MalformedCrs);
         }
 
+        // The following 2 blocks perform checks 3 (powers of tau) and 4 part 2 (H-query)
+        // using small exponent test to batch pairing computations. The formulas are in
+        // https://hackmd.io/OF8ERbVkSI6kh46WTXOlOw though the notation may not match
+        // TODO: permalink
+
         {
             let h_query = start_timer!(|| "H-query validation");
 
@@ -710,8 +715,6 @@ impl<E: Engine> ExtendedParameters<E> {
         }
 
         {
-            // TODO: desc
-            // https://hackmd.io/OF8ERbVkSI6kh46WTXOlOw //TODO: permalink
             let taus_validation = start_timer!(|| "Powers of tau validation");
 
             let mut p = vec![];
