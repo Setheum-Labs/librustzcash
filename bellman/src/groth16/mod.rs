@@ -1046,22 +1046,20 @@ mod test_with_bls12_381 {
             self,
             cs: &mut CS,
         ) -> Result<(), SynthesisError> {
-            for _ in 0..100 {
-                let a = cs.alloc(|| "a", || self.a.ok_or(SynthesisError::AssignmentMissing))?;
-                let b = cs.alloc(|| "b", || self.b.ok_or(SynthesisError::AssignmentMissing))?;
-                let c = cs.alloc_input(
-                    || "c",
-                    || {
-                        let mut a = self.a.ok_or(SynthesisError::AssignmentMissing)?;
-                        let b = self.b.ok_or(SynthesisError::AssignmentMissing)?;
+            let a = cs.alloc(|| "a", || self.a.ok_or(SynthesisError::AssignmentMissing))?;
+            let b = cs.alloc(|| "b", || self.b.ok_or(SynthesisError::AssignmentMissing))?;
+            let c = cs.alloc_input(
+                || "c",
+                || {
+                    let mut a = self.a.ok_or(SynthesisError::AssignmentMissing)?;
+                    let b = self.b.ok_or(SynthesisError::AssignmentMissing)?;
 
-                        a.mul_assign(&b);
-                        Ok(a)
-                    },
-                )?;
+                    a.mul_assign(&b);
+                    Ok(a)
+                },
+            )?;
 
-                cs.enforce(|| "a*b=c", |lc| lc + a, |lc| lc + b, |lc| lc + c);
-            }
+            cs.enforce(|| "a*b=c", |lc| lc + a, |lc| lc + b, |lc| lc + c);
             Ok(())
         }
     }
