@@ -793,13 +793,13 @@ impl<E: Engine> ExtendedParameters<E> {
         // The code bellow is borrowed from https://github.com/ebfull/powersoftau/blob/5429415959175082207fd61c10319e47a6b56e87/src/bin/verify.rs#L162-L225
         let worker = Worker::new();
 
-        let mut g1_coeffs = EvaluationDomain::<E, _>::from_coeffs(
+        let g1_coeffs = EvaluationDomain::<E, _>::from_coeffs(
             self.taus_g1.iter()
             .map(|e| Point(e.to_projective()))
             .collect()
         ).unwrap(); //TODO: remove Arc?
 
-        let mut g2_coeffs = EvaluationDomain::<E, _>::from_coeffs(
+        let g2_coeffs = EvaluationDomain::<E, _>::from_coeffs(
             self.taus_g2.iter()
                 .map(|e| Point(e.to_projective()))
                 .collect()
