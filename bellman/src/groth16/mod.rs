@@ -603,8 +603,6 @@ pub struct ExtendedParameters<E: Engine> {
 
     pub taus_g1: Vec<E::G1Affine>,
     pub taus_g2: Vec<E::G2Affine>,
-
-    pub taum_g1: E::G1Affine,
 }
 
 impl<E: Engine> PartialEq for ExtendedParameters<E> {
@@ -612,7 +610,6 @@ impl<E: Engine> PartialEq for ExtendedParameters<E> {
         self.params == other.params
             && self.taus_g1 == other.taus_g1
             && self.taus_g2 == other.taus_g2
-            && self.taum_g1 == other.taum_g1
     }
 }
 
@@ -995,8 +992,6 @@ impl<E: Engine> ExtendedParameters<E> {
             writer.write_all(g.to_uncompressed().as_ref())?;
         }
 
-        writer.write_all(self.taum_g1.to_uncompressed().as_ref())?;
-
         Ok(())
     }
 
@@ -1020,13 +1015,10 @@ impl<E: Engine> ExtendedParameters<E> {
             }
         }
 
-        let taum_g1 = read_g1::<R, E>(&mut reader, checked)?;
-
         Ok(ExtendedParameters {
             params: params,
             taus_g1: taus_g1,
             taus_g2: taus_g2,
-            taum_g1: taum_g1
         })
     }
 }

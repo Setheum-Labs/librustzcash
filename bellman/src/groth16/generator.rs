@@ -362,11 +362,6 @@ where
         });
     }
 
-    let mut taum = powers_of_tau.as_ref()[powers_of_tau.as_ref().len() - 1];
-    taum.0.mul_assign(&tau);
-    let mut taum_g1 = g1.clone();
-    MulAssign::<E::Fr>::mul_assign(&mut taum_g1, taum.0);
-
     // Use inverse FFT to convert powers of tau to Lagrange coefficients
     powers_of_tau.ifft(&worker);
     let powers_of_tau = powers_of_tau.into_coeffs();
@@ -580,6 +575,5 @@ where
         params: params,
         taus_g1: taus_g1,
         taus_g2: taus_g2,
-        taum_g1: taum_g1.to_affine()
     })
 }
