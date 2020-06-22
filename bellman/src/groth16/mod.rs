@@ -2,9 +2,9 @@
 //!
 //! [Groth16]: https://eprint.iacr.org/2016/260
 
-use group::{CurveAffine, CurveProjective, Group};
-use pairing::{Engine, PairingCurveAffine};
-use ff::{Field};
+use group::{cofactor::CofactorCurveAffine, GroupEncoding, UncompressedEncoding, Curve, Group};
+use pairing::{Engine, MultiMillerLoop, MillerLoopResult};
+use ff::{Field, PrimeField};
 
 use crate::{SynthesisError, Circuit, ConstraintSystem, Index, Variable, LinearCombination};
 use crate::domain::{EvaluationDomain, Point};
@@ -45,19 +45,19 @@ impl<E: Engine> PartialEq for Proof<E> {
 
 impl<E: Engine> Proof<E> {
     pub fn write<W: Write>(&self, mut writer: W) -> io::Result<()> {
-        writer.write_all(self.a.to_compressed().as_ref())?;
-        writer.write_all(self.b.to_compressed().as_ref())?;
-        writer.write_all(self.c.to_compressed().as_ref())?;
+        writer.write_all(self.a.to_bytes().as_ref())?;
+        writer.write_all(self.b.to_bytes().as_ref())?;
+        writer.write_all(self.c.to_bytes().as_ref())?;
 
         Ok(())
     }
 
     pub fn read<R: Read>(mut reader: R) -> io::Result<Self> {
         let read_g1 = |reader: &mut R| -> io::Result<E::G1Affine> {
-            let mut g1_repr = <E::G1Affine as CurveAffine>::Compressed::default();
+            let mut g1_repr = <E::G1Affine as GroupEncoding>::Repr::default();
             reader.read_exact(g1_repr.as_mut())?;
 
-            let affine = E::G1Affine::from_compressed(&g1_repr);
+            let affine = E::G1Affine::from_bytes(&g1_repr);
             let affine = if affine.is_some().into() {
                 Ok(affine.unwrap())
             } else {
@@ -77,10 +77,10 @@ impl<E: Engine> Proof<E> {
         };
 
         let read_g2 = |reader: &mut R| -> io::Result<E::G2Affine> {
-            let mut g2_repr = <E::G2Affine as CurveAffine>::Compressed::default();
+            let mut g2_repr = <E::G2Affine as GroupEncoding>::Repr::default();
             reader.read_exact(g2_repr.as_mut())?;
 
-            let affine = E::G2Affine::from_compressed(&g2_repr);
+            let affine = E::G2Affine::from_bytes(&g2_repr);
             let affine = if affine.is_some().into() {
                 Ok(affine.unwrap())
             } else {
@@ -165,7 +165,7 @@ impl<E: Engine> VerifyingKey<E> {
 
     pub fn read<R: Read>(mut reader: R) -> io::Result<Self> {
         let read_g1 = |reader: &mut R| -> io::Result<E::G1Affine> {
-            let mut g1_repr = <E::G1Affine as CurveAffine>::Uncompressed::default();
+            let mut g1_repr = <E::G1Affine as UncompressedEncoding>::Uncompressed::default();
             reader.read_exact(g1_repr.as_mut())?;
 
             let affine = E::G1Affine::from_uncompressed(&g1_repr);
@@ -177,7 +177,7 @@ impl<E: Engine> VerifyingKey<E> {
         };
 
         let read_g2 = |reader: &mut R| -> io::Result<E::G2Affine> {
-            let mut g2_repr = <E::G2Affine as CurveAffine>::Uncompressed::default();
+            let mut g2_repr = <E::G2Affine as UncompressedEncoding>::Uncompressed::default();
             reader.read_exact(g2_repr.as_mut())?;
 
             let affine = E::G2Affine::from_uncompressed(&g2_repr);
@@ -263,7 +263,7 @@ impl<E: Engine> PartialEq for Parameters<E> {
 }
 
 fn read_g1<R: Read, E: Engine>(reader: &mut R, checked: bool) -> io::Result<E::G1Affine> {
-    let mut repr = <E::G1Affine as CurveAffine>::Uncompressed::default();
+    let mut repr = <E::G1Affine as UncompressedEncoding>::Uncompressed::default();
     reader.read_exact(repr.as_mut())?;
 
     let affine = if checked {
@@ -290,9 +290,8 @@ fn read_g1<R: Read, E: Engine>(reader: &mut R, checked: bool) -> io::Result<E::G
     })
 }
 
-
-fn read_g2<R: Read, E: Engine>(reader: &mut R, checked: bool) -> io::Result<E::G2Affine>  {
-    let mut repr = <E::G2Affine as CurveAffine>::Uncompressed::default();
+fn read_g2<R: Read, E: Engine>(reader: &mut R, checked: bool) -> io::Result<E::G2Affine> {
+    let mut repr = <E::G2Affine as UncompressedEncoding>::Uncompressed::default();
     reader.read_exact(repr.as_mut())?;
 
     let affine = if checked {
@@ -406,13 +405,13 @@ impl<E: Engine> Parameters<E> {
     }
 }
 
-pub struct PreparedVerifyingKey<E: Engine> {
+pub struct PreparedVerifyingKey<E: MultiMillerLoop> {
     /// Pairing result of alpha*beta
-    alpha_g1_beta_g2: E::Fqk,
+    alpha_g1_beta_g2: E::Gt,
     /// -gamma in G2
-    neg_gamma_g2: <E::G2Affine as PairingCurveAffine>::Prepared,
+    neg_gamma_g2: E::G2Prepared,
     /// -delta in G2
-    neg_delta_g2: <E::G2Affine as PairingCurveAffine>::Prepared,
+    neg_delta_g2: E::G2Prepared,
     /// Copy of IC from `VerifiyingKey`.
     ic: Vec<E::G1Affine>,
 }
@@ -484,24 +483,24 @@ impl<'a, E: Engine> ParameterSource<E> for &'a Parameters<E> {
 
 /// This is our assembly structure that we'll use to synthesize the
 /// circuit into a QAP.
-pub struct KeypairAssembly<E: Engine> {
+struct KeypairAssembly<Scalar: PrimeField> {
     num_inputs: usize,
     num_aux: usize,
     num_constraints: usize,
-    at_inputs: Vec<Vec<(E::Fr, usize)>>,
-    bt_inputs: Vec<Vec<(E::Fr, usize)>>,
-    ct_inputs: Vec<Vec<(E::Fr, usize)>>,
-    at_aux: Vec<Vec<(E::Fr, usize)>>,
-    bt_aux: Vec<Vec<(E::Fr, usize)>>,
-    ct_aux: Vec<Vec<(E::Fr, usize)>>,
+    at_inputs: Vec<Vec<(Scalar, usize)>>,
+    bt_inputs: Vec<Vec<(Scalar, usize)>>,
+    ct_inputs: Vec<Vec<(Scalar, usize)>>,
+    at_aux: Vec<Vec<(Scalar, usize)>>,
+    bt_aux: Vec<Vec<(Scalar, usize)>>,
+    ct_aux: Vec<Vec<(Scalar, usize)>>,
 }
 
-impl<E: Engine> ConstraintSystem<E> for KeypairAssembly<E> {
+impl<Scalar: PrimeField> ConstraintSystem<Scalar> for KeypairAssembly<Scalar> {
     type Root = Self;
 
     fn alloc<F, A, AR>(&mut self, _: A, _: F) -> Result<Variable, SynthesisError>
         where
-            F: FnOnce() -> Result<E::Fr, SynthesisError>,
+            F: FnOnce() -> Result<Scalar, SynthesisError>,
             A: FnOnce() -> AR,
             AR: Into<String>,
     {
@@ -520,7 +519,7 @@ impl<E: Engine> ConstraintSystem<E> for KeypairAssembly<E> {
 
     fn alloc_input<F, A, AR>(&mut self, _: A, _: F) -> Result<Variable, SynthesisError>
         where
-            F: FnOnce() -> Result<E::Fr, SynthesisError>,
+            F: FnOnce() -> Result<Scalar, SynthesisError>,
             A: FnOnce() -> AR,
             AR: Into<String>,
     {
@@ -541,14 +540,14 @@ impl<E: Engine> ConstraintSystem<E> for KeypairAssembly<E> {
         where
             A: FnOnce() -> AR,
             AR: Into<String>,
-            LA: FnOnce(LinearCombination<E>) -> LinearCombination<E>,
-            LB: FnOnce(LinearCombination<E>) -> LinearCombination<E>,
-            LC: FnOnce(LinearCombination<E>) -> LinearCombination<E>,
+            LA: FnOnce(LinearCombination<Scalar>) -> LinearCombination<Scalar>,
+            LB: FnOnce(LinearCombination<Scalar>) -> LinearCombination<Scalar>,
+            LC: FnOnce(LinearCombination<Scalar>) -> LinearCombination<Scalar>,
     {
-        fn eval<E: Engine>(
-            l: LinearCombination<E>,
-            inputs: &mut [Vec<(E::Fr, usize)>],
-            aux: &mut [Vec<(E::Fr, usize)>],
+        fn eval<Scalar: PrimeField>(
+            l: LinearCombination<Scalar>,
+            inputs: &mut [Vec<(Scalar, usize)>],
+            aux: &mut [Vec<(Scalar, usize)>],
             this_constraint: usize,
         ) {
             for (index, coeff) in l.0 {
@@ -613,7 +612,7 @@ impl<E: Engine> PartialEq for ExtendedParameters<E> {
     }
 }
 
-impl<E: Engine> ExtendedParameters<E> {
+impl<E: MultiMillerLoop> ExtendedParameters<E> {
 
     // Checks the CRS for possible subversion by the malicious generator. It does not guarantee subversion soundness,
     // meaning that the generator can still use the trapdoor to produce valid proofs of false statements,
@@ -621,7 +620,7 @@ impl<E: Engine> ExtendedParameters<E> {
     // This is useful in the case, when the verifier plays the role of the generator and passes the CRS to the prover, who runs this check against it.
     // Then the verifier can be sure in the soundness as only it knows the trapdoor, and the prover is given it's privacy.
     // Follows the procedure from Georg Fuchsbauer, Subversion-zero-knowledge SNARKs (https://eprint.iacr.org/2017/587), p. 26
-    pub fn verify<C: Circuit<E>, R: RngCore>(&self, circuit: C, rng: &mut R) -> Result<(), SynthesisError> {
+    pub fn verify<C: Circuit<E::Fr>, R: RngCore>(&self, circuit: C, rng: &mut R) -> Result<(), SynthesisError> {
         assert_eq!(self.taus_g1.len(), self.taus_g2.len());
         // generator points
         let g1 = self.taus_g1[0];
@@ -669,11 +668,11 @@ impl<E: Engine> ExtendedParameters<E> {
 
         // 4
         // e(P1, pk'_beta) = e(pk_beta, P2)
-        if E::pairing(g1, self.params.vk.beta_g2) != E::pairing(self.params.vk.beta_g1, g2) {
+        if E::pairing(&g1, &self.params.vk.beta_g2) != E::pairing(&self.params.vk.beta_g1, &g2) {
             return Err(SynthesisError::MalformedCrs);
         }
         // e(P1, pk'_delta) = e(pk_delta, P2)
-        if E::pairing(g1, self.params.vk.delta_g2) != E::pairing(self.params.vk.delta_g1, g2) {
+        if E::pairing(&g1, &self.params.vk.delta_g2) != E::pairing(&self.params.vk.delta_g1, &g2) {
             return Err(SynthesisError::MalformedCrs);
         }
 
@@ -701,14 +700,12 @@ impl<E: Engine> ExtendedParameters<E> {
             let acc_taus_g2_shifted: E::G2 = multiexp(&worker, (taus_g2_shifted, 0), FullDensity, r).wait().unwrap();
 
             // The vanishing polynomial is z(X) = X^{d+1} - 1 for our domain, where d+1 is domain size
-            let res = E::final_exponentiation(&E::miller_loop(
-                [
-                    (&acc_h_g1.to_affine().prepare(), &pvk.neg_delta_g2),
-                    (&g1.neg().prepare(), &acc_taus_g2.to_affine().prepare()),
-                    (&self.taus_g1[d].prepare(), &acc_taus_g2_shifted.to_affine().prepare())
-                ].iter()
-            )).unwrap();
-            if res != E::Fqk::one() {
+            let res = E::multi_miller_loop(&[
+                (&acc_h_g1.to_affine(), &pvk.neg_delta_g2),
+                (&g1.neg(), &acc_taus_g2.to_affine().into()),
+                (&self.taus_g1[d], &acc_taus_g2_shifted.to_affine().into())
+            ]).final_exponentiation();
+            if res != E::Gt::one() {
                 return Err(SynthesisError::MalformedCrs);
             }
             end_timer!(h_query);
@@ -745,14 +742,14 @@ impl<E: Engine> ExtendedParameters<E> {
             let g1 = self.taus_g1[0];
             let neg_g2 = self.taus_g2[0].neg();
             let tau_g2 = self.taus_g2[1];
-            let res = E::final_exponentiation(&E::miller_loop(
-                [
-                    (&pq_tau_g1.to_affine().prepare(), &neg_g2.prepare()),
-                    (&p_tau_g1.to_affine().prepare(), &tau_g2.prepare()),
-                    (&g1.prepare(), &q_tau_g2.to_affine().prepare())
-                ].iter()
-            )).unwrap();
-            if res != E::Fqk::one() {
+
+
+            let res = E::multi_miller_loop(&[
+                (&pq_tau_g1.to_affine(), &neg_g2.into()),
+                (&p_tau_g1.to_affine(), &tau_g2.into()),
+                (&g1, &q_tau_g2.to_affine().into())
+            ]).final_exponentiation();
+            if res != E::Gt::one() {
                 return Err(SynthesisError::MalformedCrs);
             }
             end_timer!(taus_validation);
@@ -796,15 +793,15 @@ impl<E: Engine> ExtendedParameters<E> {
         // The code bellow is borrowed from https://github.com/ebfull/powersoftau/blob/5429415959175082207fd61c10319e47a6b56e87/src/bin/verify.rs#L162-L225
         let worker = Worker::new();
 
-        let mut g1_coeffs = EvaluationDomain::<E, _>::from_coeffs(
+        let mut g1_coeffs = EvaluationDomain::from_coeffs(
             self.taus_g1.iter()
-            .map(|e| Point(e.to_projective()))
+            .map(|e| Point(e.to_curve()))
             .collect()
         ).unwrap(); //TODO: remove Arc?
 
-        let mut g2_coeffs = EvaluationDomain::<E, _>::from_coeffs(
+        let mut g2_coeffs = EvaluationDomain::from_coeffs(
             self.taus_g2.iter()
-                .map(|e| Point(e.to_projective()))
+                .map(|e| Point(e.to_curve()))
                 .collect()
         ).unwrap(); //TODO: remove Arc?
 
@@ -957,19 +954,16 @@ impl<E: Engine> ExtendedParameters<E> {
             let acc_l_g1: E::G1 = multiexp(&worker, (self.params.l.clone(), 0), FullDensity, z_aux).wait().unwrap();
             let acc_ic_g1: E::G1 = multiexp(&worker, (Arc::new(self.params.vk.ic.clone()), 0), FullDensity, z_inp).wait().unwrap();
 
-            let res = E::final_exponentiation(&E::miller_loop(
-                [
-                    (&acc_a_g1.to_affine().prepare(), &self.params.vk.beta_g2.prepare()),
-                    (&self.params.vk.alpha_g1.prepare(), &acc_b_g2.to_affine().prepare()),
-                    (&acc_c_g1.to_affine().prepare(), &g2.prepare()),
-                    (&acc_l_g1.to_affine().prepare(), &pvk.neg_delta_g2),
-                    (&acc_ic_g1.to_affine().prepare(), &pvk.neg_gamma_g2)
-                ].iter()
-            )).unwrap();
-            if res != E::Fqk::one() {
+            let res = E::multi_miller_loop(&[
+                (&acc_a_g1.to_affine(), &self.params.vk.beta_g2.into()),
+                (&self.params.vk.alpha_g1, &acc_b_g2.to_affine().into()),
+                (&acc_c_g1.to_affine(), &g2.into()),
+                (&acc_l_g1.to_affine(), &pvk.neg_delta_g2),
+                (&acc_ic_g1.to_affine(), &pvk.neg_gamma_g2)
+            ]).final_exponentiation();
+            if res != E::Gt::one() {
                 return Err(SynthesisError::MalformedCrs);
             }
-
             end_timer!(circuit_validation);
         }
 
@@ -1031,19 +1025,19 @@ mod test_with_bls12_381 {
     use super::*;
     use crate::{Circuit, ConstraintSystem, SynthesisError};
 
-    use ff::Field;
+    use ff::{Field, PrimeField};
     use pairing::bls12_381::{Bls12, Fr};
     use rand::thread_rng;
     use std::ops::MulAssign;
     use std::marker::PhantomData;
 
-    struct MySillyCircuit<E: Engine> {
-        a: Option<E::Fr>,
-        b: Option<E::Fr>,
+    struct MySillyCircuit<Scalar: PrimeField> {
+        a: Option<Scalar>,
+        b: Option<Scalar>,
     }
 
-    impl<E: Engine> Circuit<E> for MySillyCircuit<E> {
-        fn synthesize<CS: ConstraintSystem<E>>(
+    impl<Scalar: PrimeField> Circuit<Scalar> for MySillyCircuit<Scalar> {
+        fn synthesize<CS: ConstraintSystem<Scalar>>(
             self,
             cs: &mut CS,
         ) -> Result<(), SynthesisError> {
@@ -1101,8 +1095,7 @@ mod test_with_bls12_381 {
                 },
                 &params,
                 rng,
-            )
-            .unwrap();
+            ).unwrap();
 
             let mut v = vec![];
             proof.write(&mut v).unwrap();
@@ -1137,12 +1130,12 @@ mod test_with_bls12_381 {
     fn subversion_check() {
 
         #[derive(Clone)]
-        pub struct Benchmark<E: Engine> {
+        pub struct Benchmark<Scalar: PrimeField> {
             num_constraints: usize,
-            _engine: PhantomData<E::Fr>,
+            _engine: PhantomData<Scalar>,
         }
 
-        impl<E: Engine> Benchmark<E> {
+        impl<Scalar: PrimeField> Benchmark<Scalar> {
             pub fn new(num_constraints: usize) -> Self {
                 Self {
                     num_constraints,
@@ -1151,17 +1144,17 @@ mod test_with_bls12_381 {
             }
         }
 
-        impl<E: Engine> Circuit<E> for Benchmark<E> {
-            fn synthesize<CS: ConstraintSystem<E>>(
+        impl<Scalar: PrimeField> Circuit<Scalar> for Benchmark<Scalar> {
+            fn synthesize<CS: ConstraintSystem<Scalar>>(
                 self,
                 cs: &mut CS,
             ) -> Result<(), SynthesisError> {
                 let mut assignments = Vec::new();
-                let mut a_val = E::Fr::one();
+                let mut a_val = Scalar::one();
                 let mut a_var = cs.alloc_input(|| "a", || Ok(a_val))?;
                 assignments.push((a_val, a_var));
 
-                let mut b_val = E::Fr::one();
+                let mut b_val = Scalar::one();
                 let mut b_var = cs.alloc_input(|| "b", || Ok(b_val))?;
                 assignments.push((b_val, a_var));
 
@@ -1205,7 +1198,7 @@ mod test_with_bls12_381 {
 
                 let mut a_lc = LinearCombination::zero();
                 let mut b_lc = LinearCombination::zero();
-                let mut c_val = E::Fr::zero();
+                let mut c_val = Scalar::zero();
 
                 for (val, var) in assignments {
                     a_lc = a_lc + var;

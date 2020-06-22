@@ -1,6 +1,10 @@
-use ff::{Field, PrimeField, ScalarEngine};
-use group::{CurveAffine, CurveProjective, Group, PrimeGroup};
-use pairing::{Engine, PairingCurveAffine};
+use ff::{Field, PrimeField};
+use group::{
+    cofactor::{CofactorCurve, CofactorCurveAffine, CofactorGroup},
+    prime::PrimeGroup,
+    Curve, Group, GroupEncoding, UncompressedEncoding, WnafGroup,
+};
+use pairing::{Engine, MillerLoopResult, MultiMillerLoop, PairingCurveAffine};
 
 use rand_core::RngCore;
 use std::fmt;
@@ -324,33 +328,30 @@ impl PrimeField for Fr {
 #[derive(Clone)]
 pub struct DummyEngine;
 
-impl ScalarEngine for DummyEngine {
-    type Fr = Fr;
-}
-
 impl Engine for DummyEngine {
+    type Fr = Fr;
     type G1 = Fr;
     type G1Affine = Fr;
     type G2 = Fr;
     type G2Affine = Fr;
-    type Fq = Fr;
-    type Fqe = Fr;
 
     // TODO: This should be F_645131 or something. Doesn't matter for now.
-    type Fqk = Fr;
+    type Gt = Fr;
 
-    fn miller_loop<'a, I>(i: I) -> Self::Fqk
-    where
-        I: IntoIterator<
-            Item = &'a (
-                &'a <Self::G1Affine as PairingCurveAffine>::Prepared,
-                &'a <Self::G2Affine as PairingCurveAffine>::Prepared,
-            ),
-        >,
-    {
+    fn pairing(p: &Self::G1Affine, q: &Self::G2Affine) -> Self::Gt {
+        Self::multi_miller_loop(&[(p, &(*q).into())]).final_exponentiation()
+    }
+}
+
+impl MultiMillerLoop for DummyEngine {
+    type G2Prepared = Fr;
+    // TODO: This should be F_645131 or something. Doesn't matter for now.
+    type Result = Fr;
+
+    fn multi_miller_loop(terms: &[(&Self::G1Affine, &Self::G2Prepared)]) -> Self::Result {
         let mut acc = <Fr as Field>::zero();
 
-        for &(a, b) in i {
+        for &(a, b) in terms {
             let mut tmp = *a;
             MulAssign::mul_assign(&mut tmp, b);
             AddAssign::add_assign(&mut acc, &tmp);
@@ -358,15 +359,18 @@ impl Engine for DummyEngine {
 
         acc
     }
+}
+
+impl MillerLoopResult for Fr {
+    type Gt = Fr;
 
     /// Perform final exponentiation of the result of a miller loop.
-    fn final_exponentiation(this: &Self::Fqk) -> CtOption<Self::Fqk> {
-        CtOption::new(*this, Choice::from(1))
+    fn final_exponentiation(&self) -> Self::Gt {
+        *self
     }
 }
 
 impl Group for Fr {
-    type Subgroup = Fr;
     type Scalar = Fr;
 
     fn random<R: RngCore + ?Sized>(rng: &mut R) -> Self {
@@ -392,22 +396,27 @@ impl Group for Fr {
 
 impl PrimeGroup for Fr {}
 
-impl CurveProjective for Fr {
-    type Affine = Fr;
-    type Base = Fr;
+impl CofactorGroup for Fr {
+    type Subgroup = Fr;
 
-    fn batch_normalize(p: &[Self], q: &mut [Self::Affine]) {
-        assert_eq!(p.len(), q.len());
-
-        for (p, q) in p.iter().zip(q.iter_mut()) {
-            *q = p.to_affine();
-        }
+    fn mul_by_cofactor(&self) -> Self::Subgroup {
+        *self
     }
+
+    fn into_subgroup(self) -> CtOption<Self::Subgroup> {
+        CtOption::new(self, Choice::from(1))
+    }
+}
+
+impl Curve for Fr {
+    type AffineRepr = Fr;
 
     fn to_affine(&self) -> Fr {
         *self
     }
+}
 
+impl WnafGroup for Fr {
     fn recommended_wnaf_for_scalar(_: &Self::Scalar) -> usize {
         3
     }
@@ -415,6 +424,10 @@ impl CurveProjective for Fr {
     fn recommended_wnaf_for_num_scalars(_: usize) -> usize {
         3
     }
+}
+
+impl CofactorCurve for Fr {
+    type Affine = Fr;
 }
 
 #[derive(Copy, Clone, Default)]
@@ -432,11 +445,8 @@ impl AsRef<[u8]> for FakePoint {
     }
 }
 
-impl CurveAffine for Fr {
-    type Compressed = FakePoint;
-    type Uncompressed = FakePoint;
-    type Projective = Fr;
-    type Base = Fr;
+impl CofactorCurveAffine for Fr {
+    type Curve = Fr;
     type Scalar = Fr;
 
     fn identity() -> Self {
@@ -451,21 +461,29 @@ impl CurveAffine for Fr {
         Choice::from(if <Fr as Field>::is_zero(self) { 1 } else { 0 })
     }
 
-    fn to_projective(&self) -> Self::Projective {
+    fn to_curve(&self) -> Self::Curve {
         *self
     }
+}
 
-    fn from_compressed(_bytes: &Self::Compressed) -> CtOption<Self> {
+impl GroupEncoding for Fr {
+    type Repr = FakePoint;
+
+    fn from_bytes(_bytes: &Self::Repr) -> CtOption<Self> {
         unimplemented!()
     }
 
-    fn from_compressed_unchecked(_bytes: &Self::Compressed) -> CtOption<Self> {
+    fn from_bytes_unchecked(_bytes: &Self::Repr) -> CtOption<Self> {
         unimplemented!()
     }
 
-    fn to_compressed(&self) -> Self::Compressed {
+    fn to_bytes(&self) -> Self::Repr {
         unimplemented!()
     }
+}
+
+impl UncompressedEncoding for Fr {
+    type Uncompressed = FakePoint;
 
     fn from_uncompressed(_bytes: &Self::Uncompressed) -> CtOption<Self> {
         unimplemented!()
@@ -481,13 +499,8 @@ impl CurveAffine for Fr {
 }
 
 impl PairingCurveAffine for Fr {
-    type Prepared = Fr;
     type Pair = Fr;
     type PairingResult = Fr;
-
-    fn prepare(&self) -> Self::Prepared {
-        *self
-    }
 
     fn pairing_with(&self, other: &Self::Pair) -> Self::PairingResult {
         self.mul(*other)

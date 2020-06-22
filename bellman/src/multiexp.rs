@@ -2,7 +2,7 @@ use super::multicore::Worker;
 use bit_vec::{self, BitVec};
 use ff::{Endianness, Field, PrimeField};
 use futures::Future;
-use group::{CurveAffine, CurveProjective};
+use group::cofactor::{CofactorCurve, CofactorCurveAffine};
 use std::io;
 use std::iter;
 use std::ops::AddAssign;
@@ -11,33 +11,33 @@ use std::sync::Arc;
 use super::SynthesisError;
 
 /// An object that builds a source of bases.
-pub trait SourceBuilder<G: CurveAffine>: Send + Sync + 'static + Clone {
+pub trait SourceBuilder<G: CofactorCurveAffine>: Send + Sync + 'static + Clone {
     type Source: Source<G>;
 
     fn new(self) -> Self::Source;
 }
 
 /// A source of bases, like an iterator.
-pub trait Source<G: CurveAffine> {
+pub trait Source<G: CofactorCurveAffine> {
     fn next(&mut self) -> Result<&G, SynthesisError>;
 
     /// Skips `amt` elements from the source, avoiding deserialization.
     fn skip(&mut self, amt: usize) -> Result<(), SynthesisError>;
 }
 
-pub trait AddAssignFromSource: CurveProjective {
+pub trait AddAssignFromSource: CofactorCurve {
     /// Parses the element from the source. Fails if the point is at infinity.
-    fn add_assign_from_source<S: Source<<Self as CurveProjective>::Affine>>(
+    fn add_assign_from_source<S: Source<<Self as CofactorCurve>::Affine>>(
         &mut self,
         source: &mut S,
     ) -> Result<(), SynthesisError> {
-        AddAssign::<&<Self as CurveProjective>::Affine>::add_assign(self, source.next()?);
+        AddAssign::<&<Self as CofactorCurve>::Affine>::add_assign(self, source.next()?);
         Ok(())
     }
 }
-impl<G> AddAssignFromSource for G where G: CurveProjective {}
+impl<G> AddAssignFromSource for G where G: CofactorCurve {}
 
-impl<G: CurveAffine> SourceBuilder<G> for (Arc<Vec<G>>, usize) {
+impl<G: CofactorCurveAffine> SourceBuilder<G> for (Arc<Vec<G>>, usize) {
     type Source = (Arc<Vec<G>>, usize);
 
     fn new(self) -> (Arc<Vec<G>>, usize) {
@@ -45,7 +45,7 @@ impl<G: CurveAffine> SourceBuilder<G> for (Arc<Vec<G>>, usize) {
     }
 }
 
-impl<G: CurveAffine> Source<G> for (Arc<Vec<G>>, usize) {
+impl<G: CofactorCurveAffine> Source<G> for (Arc<Vec<G>>, usize) {
     fn next(&mut self) -> Result<&G, SynthesisError> {
         if self.0.len() <= self.1 {
             return Err(io::Error::new(
@@ -162,8 +162,8 @@ fn multiexp_inner<Q, D, G, S>(
 where
     for<'a> &'a Q: QueryDensity,
     D: Send + Sync + 'static + Clone + AsRef<Q>,
-    G: CurveProjective,
-    S: SourceBuilder<<G as CurveProjective>::Affine>,
+    G: CofactorCurve,
+    S: SourceBuilder<<G as CofactorCurve>::Affine>,
 {
     // Perform this region of the multiexp
     let this = {
@@ -274,8 +274,8 @@ pub fn multiexp<Q, D, G, S>(
 where
     for<'a> &'a Q: QueryDensity,
     D: Send + Sync + 'static + Clone + AsRef<Q>,
-    G: CurveProjective,
-    S: SourceBuilder<<G as CurveProjective>::Affine>,
+    G: CofactorCurve,
+    S: SourceBuilder<<G as CofactorCurve>::Affine>,
 {
     let c = if exponents.len() < 32 {
         3u32
@@ -293,14 +293,11 @@ where
     multiexp_inner(pool, bases, density_map, exponents, 0, c, true)
 }
 
-#[cfg(all(test, feature = "pairing"))]
-use ff::ScalarEngine;
-
 #[cfg(feature = "pairing")]
 #[test]
 fn test_with_bls12() {
-    fn naive_multiexp<G: CurveProjective>(
-        bases: Arc<Vec<<G as CurveProjective>::Affine>>,
+    fn naive_multiexp<G: CofactorCurve>(
+        bases: Arc<Vec<<G as CofactorCurve>::Affine>>,
         exponents: Arc<Vec<G::Scalar>>,
     ) -> G {
         assert_eq!(bases.len(), exponents.len());
@@ -314,18 +311,17 @@ fn test_with_bls12() {
         acc
     }
 
-    use group::Group;
-    use pairing::{bls12_381::Bls12, Engine};
+    use group::{Curve, Group};
+    use pairing::{
+        bls12_381::{Bls12, Fr},
+        Engine,
+    };
     use rand;
 
     const SAMPLES: usize = 1 << 14;
 
     let rng = &mut rand::thread_rng();
-    let v = Arc::new(
-        (0..SAMPLES)
-            .map(|_| <Bls12 as ScalarEngine>::Fr::random(rng))
-            .collect::<Vec<_>>(),
-    );
+    let v = Arc::new((0..SAMPLES).map(|_| Fr::random(rng)).collect::<Vec<_>>());
     let g = Arc::new(
         (0..SAMPLES)
             .map(|_| <Bls12 as Engine>::G1::random(rng).to_affine())
