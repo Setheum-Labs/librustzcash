@@ -17,7 +17,7 @@ use std::sync::Arc;
 use futures::Future;
 
 use rand_core::RngCore;
-use std::ops::{AddAssign, SubAssign, Neg, MulAssign};
+use std::ops::{AddAssign, Neg, MulAssign};
 
 #[cfg(test)]
 mod tests;
@@ -680,36 +680,37 @@ impl<E: Engine> ExtendedParameters<E> {
             return Err(SynthesisError::MalformedCrs);
         }
 
-        let vanishing_poly = start_timer!(|| "Vanishing polynomial validation");
+        {
+            let h_query = start_timer!(|| "H-query validation");
 
-        let mut r = vec![];
-        r.resize_with(d, || { E::Fr::random(rng) });
-        let r = Arc::new(r);
+            let mut r = vec![];
+            r.resize_with(d, || { E::Fr::random(rng) });
+            let r = Arc::new(r);
 
-        let bases_g2 = Arc::new(self.taus_g2.clone().into_iter().take(d).collect::<Vec<_>>()); // tau^0, ..., tau^(d-1) in G2
+            let taus_g2 = Arc::new(self.taus_g2.clone().into_iter().take(d).collect::<Vec<_>>()); // tau^0, ..., tau^(d-1) in G2
+            let taus_g2_shifted = Arc::new(self.taus_g2.clone().into_iter().skip(1).collect()); // tau^1, ..., tau^d in G2
 
-        assert_eq!(self.params.h.len(), d);
-        assert_eq!(bases_g2.len(), d);
-        assert_eq!(r.len(), d);
+            assert_eq!(self.params.h.len(), d);
+            assert_eq!(taus_g2.len(), d);
+            assert_eq!(r.len(), d);
 
-        let acc_g1: E::G1 = multiexp(&worker, (self.params.h.clone(), 0), FullDensity, r.clone()).wait().unwrap();
-        let acc_g2: E::G2 = multiexp(&worker, (bases_g2, 0), FullDensity, r).wait().unwrap();
+            let acc_h_g1: E::G1 = multiexp(&worker, (self.params.h.clone(), 0), FullDensity, r.clone()).wait().unwrap();
+            let acc_taus_g2: E::G2 = multiexp(&worker, (taus_g2, 0), FullDensity, r.clone()).wait().unwrap();
+            let acc_taus_g2_shifted: E::G2 = multiexp(&worker, (taus_g2_shifted, 0), FullDensity, r).wait().unwrap();
 
-        // z (aka t in Groth16/bellman) is the vanishing polynomial of the domain. In our case z = x^m - 1
-        // btw, there's a typo un Fuc19, as z should have degree d-1 in his notation
-        let mut z = self.taum_g1.to_projective();
-        SubAssign::<&E::G1>::sub_assign(&mut z, &g1.to_projective());
-
-        let res = E::final_exponentiation(&E::miller_loop(
-            [
-                (&acc_g1.to_affine().prepare(), &pvk.neg_delta_g2),
-                (&z.to_affine().prepare(), &acc_g2.to_affine().prepare())
-            ].iter()
-        )).unwrap();
-        if res != E::Fqk::one() {
-            return Err(SynthesisError::MalformedCrs);
+            // The vanishing polynomial is z(X) = X^{d+1} - 1 for our domain, where d+1 is domain size
+            let res = E::final_exponentiation(&E::miller_loop(
+                [
+                    (&acc_h_g1.to_affine().prepare(), &pvk.neg_delta_g2),
+                    (&g1.neg().prepare(), &acc_taus_g2.to_affine().prepare()),
+                    (&self.taus_g1[d].prepare(), &acc_taus_g2_shifted.to_affine().prepare())
+                ].iter()
+            )).unwrap();
+            if res != E::Fqk::one() {
+                return Err(SynthesisError::MalformedCrs);
+            }
+            end_timer!(h_query);
         }
-        end_timer!(vanishing_poly);
 
         {
             // TODO: desc
@@ -1050,20 +1051,22 @@ mod test_with_bls12_381 {
             self,
             cs: &mut CS,
         ) -> Result<(), SynthesisError> {
-            let a = cs.alloc(|| "a", || self.a.ok_or(SynthesisError::AssignmentMissing))?;
-            let b = cs.alloc(|| "b", || self.b.ok_or(SynthesisError::AssignmentMissing))?;
-            let c = cs.alloc_input(
-                || "c",
-                || {
-                    let mut a = self.a.ok_or(SynthesisError::AssignmentMissing)?;
-                    let b = self.b.ok_or(SynthesisError::AssignmentMissing)?;
+            for _ in 0..100 {
+                let a = cs.alloc(|| "a", || self.a.ok_or(SynthesisError::AssignmentMissing))?;
+                let b = cs.alloc(|| "b", || self.b.ok_or(SynthesisError::AssignmentMissing))?;
+                let c = cs.alloc_input(
+                    || "c",
+                    || {
+                        let mut a = self.a.ok_or(SynthesisError::AssignmentMissing)?;
+                        let b = self.b.ok_or(SynthesisError::AssignmentMissing)?;
 
-                    a.mul_assign(&b);
-                    Ok(a)
-                },
-            )?;
+                        a.mul_assign(&b);
+                        Ok(a)
+                    },
+                )?;
 
-            cs.enforce(|| "a*b=c", |lc| lc + a, |lc| lc + b, |lc| lc + c);
+                cs.enforce(|| "a*b=c", |lc| lc + a, |lc| lc + b, |lc| lc + c);
+            }
             Ok(())
         }
     }
