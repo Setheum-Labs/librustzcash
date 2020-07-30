@@ -145,6 +145,7 @@ mod multiexp;
 
 use ff::PrimeField;
 
+use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 use std::io;
@@ -161,7 +162,7 @@ pub trait Circuit<Scalar: PrimeField> {
 }
 
 /// Represents a variable in our constraint system.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Variable(Index);
 
 impl Variable {
@@ -180,7 +181,7 @@ impl Variable {
 
 /// Represents the index of either an input variable or
 /// auxiliary variable.
-#[derive(Copy, Clone, PartialEq, Debug)]
+#[derive(Copy, Clone, PartialEq, Debug, Eq, Hash)]
 pub enum Index {
     Input(usize),
     Aux(usize),
@@ -189,17 +190,15 @@ pub enum Index {
 /// This represents a linear combination of some variables, with coefficients
 /// in the scalar field of a pairing-friendly elliptic curve group.
 #[derive(Clone)]
-pub struct LinearCombination<Scalar: PrimeField>(Vec<(Variable, Scalar)>);
-
-impl<Scalar: PrimeField> AsRef<[(Variable, Scalar)]> for LinearCombination<Scalar> {
-    fn as_ref(&self) -> &[(Variable, Scalar)] {
-        &self.0
-    }
-}
+pub struct LinearCombination<Scalar: PrimeField>(HashMap<Variable, Scalar>);
 
 impl<Scalar: PrimeField> LinearCombination<Scalar> {
     pub fn zero() -> LinearCombination<Scalar> {
-        LinearCombination(vec![])
+        LinearCombination(HashMap::new())
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&Variable, &Scalar)> + '_ {
+        self.0.iter()
     }
 }
 
@@ -207,7 +206,10 @@ impl<Scalar: PrimeField> Add<(Scalar, Variable)> for LinearCombination<Scalar> {
     type Output = LinearCombination<Scalar>;
 
     fn add(mut self, (coeff, var): (Scalar, Variable)) -> LinearCombination<Scalar> {
-        self.0.push((var, coeff));
+        self.0
+            .entry(var)
+            .or_insert(Scalar::zero())
+            .add_assign(&coeff);
 
         self
     }
@@ -242,8 +244,11 @@ impl<'a, Scalar: PrimeField> Add<&'a LinearCombination<Scalar>> for LinearCombin
     type Output = LinearCombination<Scalar>;
 
     fn add(mut self, other: &'a LinearCombination<Scalar>) -> LinearCombination<Scalar> {
-        for s in &other.0 {
-            self = self + (s.1, s.0);
+        for (var, val) in &other.0 {
+            self.0
+                .entry(*var)
+                .or_insert(Scalar::zero())
+                .add_assign(val);
         }
 
         self
@@ -254,8 +259,8 @@ impl<'a, Scalar: PrimeField> Sub<&'a LinearCombination<Scalar>> for LinearCombin
     type Output = LinearCombination<Scalar>;
 
     fn sub(mut self, other: &'a LinearCombination<Scalar>) -> LinearCombination<Scalar> {
-        for s in &other.0 {
-            self = self - (s.1, s.0);
+        for (var, val) in &other.0 {
+            self = self - (*val, *var);
         }
 
         self
@@ -272,9 +277,9 @@ impl<'a, Scalar: PrimeField> Add<(Scalar, &'a LinearCombination<Scalar>)>
         (coeff, other): (Scalar, &'a LinearCombination<Scalar>),
     ) -> LinearCombination<Scalar> {
         for s in &other.0 {
-            let mut tmp = s.1;
+            let mut tmp = *s.1;
             tmp.mul_assign(&coeff);
-            self = self + (tmp, s.0);
+            self = self + (tmp, *s.0);
         }
 
         self
@@ -291,9 +296,9 @@ impl<'a, Scalar: PrimeField> Sub<(Scalar, &'a LinearCombination<Scalar>)>
         (coeff, other): (Scalar, &'a LinearCombination<Scalar>),
     ) -> LinearCombination<Scalar> {
         for s in &other.0 {
-            let mut tmp = s.1;
+            let mut tmp = *s.1;
             tmp.mul_assign(&coeff);
-            self = self - (tmp, s.0);
+            self = self - (tmp, *s.0);
         }
 
         self
@@ -549,5 +554,43 @@ impl<'cs, Scalar: PrimeField, CS: ConstraintSystem<Scalar>> ConstraintSystem<Sca
 
     fn get_root(&mut self) -> &mut Self::Root {
         (**self).get_root()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_add_simplify() {
+        use pairing::bls12_381::Fr;
+        use ff::Field;
+        use std::ops::AddAssign;
+
+        let n = 5;
+
+        let mut lc = LinearCombination::<Fr>::zero();
+
+        let mut expected_sums = vec![Fr::zero(); n];
+        let mut total_additions = 0;
+        for i in 0..n {
+            for _ in 0..i + 1 {
+                let coeff = Fr::one();
+                lc = lc + (coeff, Variable::new_unchecked(Index::Aux(i)));
+                let mut tmp = expected_sums[i];
+                tmp.add_assign(&coeff);
+                expected_sums[i] = tmp;
+                total_additions += 1;
+            }
+        }
+
+        // There are only as many terms as distinct variable Indexes — not one per addition operation.
+        assert_eq!(n, lc.0.len());
+        assert!(lc.0.len() != total_additions);
+
+        // Each variable has the expected coefficient, the sume of those added by its Index.
+        lc.0.iter().for_each(|(var, coeff)| match var.0 {
+            Index::Aux(i) => assert_eq!(expected_sums[i], *coeff),
+            _ => panic!("unexpected variable type"),
+        });
     }
 }

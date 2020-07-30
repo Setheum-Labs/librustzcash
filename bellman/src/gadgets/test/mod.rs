@@ -63,9 +63,9 @@ impl Ord for OrderedVariable {
     }
 }
 
-fn proc_lc<Scalar: PrimeField>(terms: &[(Variable, Scalar)]) -> BTreeMap<OrderedVariable, Scalar> {
+fn proc_lc<Scalar: PrimeField>(terms: &LinearCombination<Scalar>) -> BTreeMap<OrderedVariable, Scalar> {
     let mut map = BTreeMap::new();
-    for &(var, coeff) in terms {
+    for (&var, &coeff) in terms.iter() {
         map.entry(OrderedVariable(var))
             .or_insert_with(Scalar::zero)
             .add_assign(&coeff);
@@ -86,7 +86,7 @@ fn proc_lc<Scalar: PrimeField>(terms: &[(Variable, Scalar)]) -> BTreeMap<Ordered
     map
 }
 
-fn hash_lc<Scalar: PrimeField>(terms: &[(Variable, Scalar)], h: &mut Blake2sState) {
+fn hash_lc<Scalar: PrimeField>(terms: &LinearCombination<Scalar>, h: &mut Blake2sState) {
     let map = proc_lc::<Scalar>(terms);
 
     let mut buf = [0u8; 9 + 32];
@@ -115,13 +115,13 @@ fn hash_lc<Scalar: PrimeField>(terms: &[(Variable, Scalar)], h: &mut Blake2sStat
 }
 
 fn eval_lc<Scalar: PrimeField>(
-    terms: &[(Variable, Scalar)],
+    terms: &LinearCombination<Scalar>,
     inputs: &[(Scalar, String)],
     aux: &[(Scalar, String)],
 ) -> Scalar {
     let mut acc = Scalar::zero();
 
-    for &(var, ref coeff) in terms {
+    for (&var, coeff) in terms.iter() {
         let mut tmp = match var.get_unchecked() {
             Index::Input(index) => inputs[index].0,
             Index::Aux(index) => aux[index].0,
@@ -163,7 +163,7 @@ impl<Scalar: PrimeField> TestConstraintSystem<Scalar> {
         let pp = |s: &mut String, lc: &LinearCombination<Scalar>| {
             write!(s, "(").unwrap();
             let mut is_first = true;
-            for (var, coeff) in proc_lc::<Scalar>(lc.as_ref()) {
+            for (var, coeff) in proc_lc::<Scalar>(&lc) {
                 if coeff == negone {
                     write!(s, " - ").unwrap();
                 } else if !is_first {
@@ -226,9 +226,9 @@ impl<Scalar: PrimeField> TestConstraintSystem<Scalar> {
         }
 
         for constraint in &self.constraints {
-            hash_lc::<Scalar>(constraint.0.as_ref(), &mut h);
-            hash_lc::<Scalar>(constraint.1.as_ref(), &mut h);
-            hash_lc::<Scalar>(constraint.2.as_ref(), &mut h);
+            hash_lc::<Scalar>(&constraint.0, &mut h);
+            hash_lc::<Scalar>(&constraint.1, &mut h);
+            hash_lc::<Scalar>(&constraint.2, &mut h);
         }
 
         let mut s = String::new();
@@ -241,9 +241,9 @@ impl<Scalar: PrimeField> TestConstraintSystem<Scalar> {
 
     pub fn which_is_unsatisfied(&self) -> Option<&str> {
         for &(ref a, ref b, ref c, ref path) in &self.constraints {
-            let mut a = eval_lc::<Scalar>(a.as_ref(), &self.inputs, &self.aux);
-            let b = eval_lc::<Scalar>(b.as_ref(), &self.inputs, &self.aux);
-            let c = eval_lc::<Scalar>(c.as_ref(), &self.inputs, &self.aux);
+            let mut a = eval_lc::<Scalar>(a, &self.inputs, &self.aux);
+            let b = eval_lc::<Scalar>(b, &self.inputs, &self.aux);
+            let c = eval_lc::<Scalar>(c, &self.inputs, &self.aux);
 
             a.mul_assign(&b);
 

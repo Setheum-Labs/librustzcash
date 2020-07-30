@@ -27,7 +27,7 @@ fn eval<S: PrimeField>(
 ) -> S {
     let mut acc = S::zero();
 
-    for &(index, coeff) in lc.0.iter() {
+    for (&index, &coeff) in lc.0.iter() {
         let mut tmp;
 
         match index {
